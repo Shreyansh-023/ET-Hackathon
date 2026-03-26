@@ -183,13 +183,16 @@ def _build_scene_manifest(
 
 def _transition_mix_frames(transition_hint: str, *, fps: int, left_frames: int, right_frames: int) -> int:
     hint = transition_hint.strip().lower()
-    if not hint or "cut" in hint or hint in {"none", "clean_cut"}:
+    # Only skip transition if explicitly set to "none"
+    if hint == "none":
         return 0
 
+    # News-style: short, punchy transitions (~0.4s)
     if any(token in hint for token in ("fade", "dissolve", "cross", "mix", "blend")):
-        base = max(1, int(round(fps * 0.25)))
+        base = max(1, int(round(fps * 0.4)))
     else:
-        base = max(1, int(round(fps * 0.2)))
+        # Default for clean_cut and everything else: brief transition
+        base = max(1, int(round(fps * 0.35)))
 
     return min(base, max(1, left_frames // 3), max(1, right_frames // 3))
 
@@ -198,31 +201,88 @@ def _ffmpeg_timestamp(seconds: float) -> str:
     return f"{max(0.0, seconds):.3f}"
 
 
-def _transition_to_xfade(transition_hint: str) -> str:
-    hint = transition_hint.strip().lower()
-    if not hint or hint in {"none", "clean_cut"}:
-        return "fade"
-
-    mapping = {
-        "dissolve": "dissolve",
-        "fade": "fade",
-        "cross": "fade",
-        "wipeleft": "wipeleft",
-        "wiperight": "wiperight",
-        "wipeup": "wipeup",
-        "wipedown": "wipedown",
-        "slideleft": "slideleft",
-        "slideright": "slideright",
-        "smoothleft": "smoothleft",
-        "smoothright": "smoothright",
-        "circle": "circlecrop",
-        "pixel": "pixelize",
-        "zoom": "zoomin",
-    }
-    for token, transition in mapping.items():
-        if token in hint:
-            return transition
+def _transition_to_xfade(transition_hint: str, *, scene_index: int = 0) -> str:
+    """Map transition hints — kept for fallback but primary approach is red bumper clips."""
     return "fade"
+
+
+def _generate_red_transition_clip(
+    output_path: Path,
+    width: int,
+    height: int,
+    fps: int,
+    duration_frames: int = 8,
+) -> Path:
+    """Generate a short red diagonal-stripe transition clip (news bumper style).
+
+    Creates an animated red/white diagonal stripe wipe effect.
+    """
+    duration_s = duration_frames / float(fps)
+
+    # Build an animated diagonal red stripe transition using geq + overlay
+    # Phase 1 (first half): red stripes sweep across screen left-to-right
+    # Phase 2 (second half): stripes continue and clear to reveal next scene
+    #
+    # We use multiple angled drawbox passes to create the diagonal stripe look,
+    # animated with the 't' (time) variable for motion.
+    stripe_w = width // 3  # each stripe width
+
+    # Create the transition as: fade-in red → hold → fade-out
+    # With diagonal stripes simulated via multiple colored bands
+    filter_graph = (
+        f"color=c=0xCC0000:s={width}x{height}:r={fps}:d={duration_s:.3f}[base];"
+        # Lighter red diagonal stripe
+        f"color=c=0xE83030:s={width}x{height}:r={fps}:d={duration_s:.3f}[s1];"
+        # Pink/white highlight stripe
+        f"color=c=0xFF6666:s={width}x{height}:r={fps}:d={duration_s:.3f}[s2];"
+        # White flash stripe
+        f"color=c=0xFFAAAA:s={width}x{height}:r={fps}:d={duration_s:.3f}[s3];"
+        # Crop stripes to diagonal bands and overlay them
+        # Stripe 1: offset animates with time
+        f"[s1]crop=w={stripe_w}:h={height}:x='mod(t/{duration_s:.3f}*{width}+{stripe_w*0},{width})':y=0[c1];"
+        f"[base][c1]overlay=x='mod(t/{duration_s:.3f}*{width*2}+0,{width})-{stripe_w//2}':y=0:shortest=1[o1];"
+        # Stripe 2
+        f"[s2]crop=w={stripe_w//2}:h={height}:x=0:y=0[c2];"
+        f"[o1][c2]overlay=x='mod(t/{duration_s:.3f}*{width*2}+{stripe_w},{width})-{stripe_w//3}':y=0:shortest=1[o2];"
+        # Stripe 3 (white flash)
+        f"[s3]crop=w={stripe_w//3}:h={height}:x=0:y=0[c3];"
+        f"[o2][c3]overlay=x='mod(t/{duration_s:.3f}*{width*2}+{stripe_w*2},{width})-{stripe_w//4}':y=0:shortest=1[o3];"
+        # Add fade in/out for smooth entry and exit
+        f"[o3]fade=t=in:st=0:d={duration_s*0.3:.3f},fade=t=out:st={duration_s*0.6:.3f}:d={duration_s*0.4:.3f}[out]"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-filter_complex", filter_graph,
+        "-map", "[out]",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", os.getenv("FFMPEG_PRESET", "medium"),
+        "-crf", os.getenv("FFMPEG_CRF", "22"),
+        "-pix_fmt", "yuv420p",
+        "-t", f"{duration_s:.3f}",
+        str(output_path),
+    ]
+
+    try:
+        _run_command(cmd, cwd=output_path.parent)
+    except RenderPipelineError:
+        # Fallback: simple solid red with fade if complex filter fails
+        simple_cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i",
+            f"color=c=0xCC0000:s={width}x{height}:r={fps}:d={duration_s:.3f}",
+            "-vf", f"fade=t=in:st=0:d={duration_s*0.4:.3f},fade=t=out:st={duration_s*0.5:.3f}:d={duration_s*0.5:.3f}",
+            "-an",
+            "-c:v", "libx264",
+            "-preset", os.getenv("FFMPEG_PRESET", "medium"),
+            "-crf", os.getenv("FFMPEG_CRF", "22"),
+            "-pix_fmt", "yuv420p",
+            str(output_path),
+        ]
+        _run_command(simple_cmd, cwd=output_path.parent)
+
+    return output_path
 
 
 def _build_visual_filter(width: int, height: int, fps: int) -> str:
@@ -386,7 +446,7 @@ def _attempt_ffmpeg_run(
                     "from_scene": scene_attempts[-1]["scene_id"],
                     "to_scene": scene_id,
                     "hint": transition_hint,
-                    "xfade": _transition_to_xfade(transition_hint),
+                    "xfade": _transition_to_xfade(transition_hint, scene_index=index),
                     "duration_frames": mix_frames,
                 }
             )
@@ -406,109 +466,50 @@ def _attempt_ffmpeg_run(
     if not segment_paths:
         return {"status": "skipped", "reason": "ffmpeg_no_renderable_scenes"}
 
-    has_transitions = any(int(t.get("duration_frames", 0)) > 0 for t in transitions)
-    concat_mode = "copy"
+    # Generate a red transition bumper clip
+    red_transition_path = scene_renders_dir / "red_transition.mp4"
+    transition_frames = 8  # ~0.27s at 30fps
+    _generate_red_transition_clip(
+        red_transition_path, width, height, fps, duration_frames=transition_frames,
+    )
+
+    concat_mode = "red_bumper"
     concat_list_value = ""
 
-    if has_transitions:
-        compose_cmd: list[str] = ["ffmpeg", "-y"]
-        for segment_path in segment_paths:
-            compose_cmd.extend(["-i", str(segment_path)])
+    # Build concat list: scene1 → red → scene2 → red → scene3 → ...
+    concat_segments: list[Path] = []
+    for i, seg_path in enumerate(segment_paths):
+        concat_segments.append(seg_path)
+        if i < len(segment_paths) - 1 and red_transition_path.exists():
+            concat_segments.append(red_transition_path)
 
-        graph_parts: list[str] = []
-        for index in range(len(segment_paths)):
-            graph_parts.append(f"[{index}:v]settb=AVTB,format=yuv420p[v{index}]")
+    concat_file_payload = "\n".join(f"file '{path.resolve().as_posix()}'" for path in concat_segments)
+    concat_list_path.write_text(f"{concat_file_payload}\n", encoding="utf-8")
+    concat_list_value = str(concat_list_path)
 
-        current_label = "v0"
-        current_duration = float(scene_attempts[0]["duration_seconds"])
-
-        for index in range(1, len(segment_paths)):
-            transition_row = transitions[index - 1]
-            transition_seconds = int(transition_row.get("duration_frames", 0)) / float(fps)
-            next_duration = float(scene_attempts[index]["duration_seconds"])
-            out_label = f"vx{index}"
-
-            if transition_seconds <= 0:
-                graph_parts.append(f"[{current_label}][v{index}]concat=n=2:v=1:a=0[{out_label}]")
-                current_duration += next_duration
-            else:
-                offset = max(0.0, current_duration - transition_seconds)
-                graph_parts.append(
-                    (
-                        f"[{current_label}][v{index}]xfade="
-                        f"transition={transition_row.get('xfade', 'fade')}:"
-                        f"duration={_ffmpeg_timestamp(transition_seconds)}:"
-                        f"offset={_ffmpeg_timestamp(offset)}"
-                        f"[{out_label}]"
-                    )
-                )
-                current_duration += next_duration - transition_seconds
-
-            current_label = out_label
-
-        compose_cmd.extend(
-            [
-                "-filter_complex",
-                ";".join(graph_parts),
-                "-map",
-                f"[{current_label}]",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                os.getenv("FFMPEG_PRESET", "medium"),
-                "-crf",
-                os.getenv("FFMPEG_CRF", "22"),
-                "-pix_fmt",
-                "yuv420p",
-                str(intermediate_raw),
-            ]
-        )
-        _run_command(compose_cmd, cwd=job_dir)
-        concat_mode = "xfade"
-    else:
-        concat_file_payload = "\n".join(f"file '{path.resolve().as_posix()}'" for path in segment_paths)
-        concat_list_path.write_text(f"{concat_file_payload}\n", encoding="utf-8")
-        concat_list_value = str(concat_list_path)
-
-        concat_copy_cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_list_path),
-            "-c",
-            "copy",
+    # Try concat with stream copy first, fall back to re-encode
+    concat_copy_cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", str(concat_list_path),
+        "-c", "copy",
+        str(intermediate_raw),
+    ]
+    try:
+        _run_command(concat_copy_cmd, cwd=job_dir)
+    except RenderPipelineError:
+        concat_reencode_cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(concat_list_path),
+            "-c:v", "libx264",
+            "-preset", os.getenv("FFMPEG_PRESET", "medium"),
+            "-crf", os.getenv("FFMPEG_CRF", "22"),
+            "-pix_fmt", "yuv420p",
             str(intermediate_raw),
         ]
-        try:
-            _run_command(concat_copy_cmd, cwd=job_dir)
-            concat_mode = "copy"
-        except RenderPipelineError:
-            concat_reencode_cmd = [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_list_path),
-                "-c:v",
-                "libx264",
-                "-preset",
-                os.getenv("FFMPEG_PRESET", "medium"),
-                "-crf",
-                os.getenv("FFMPEG_CRF", "22"),
-                "-pix_fmt",
-                "yuv420p",
-                str(intermediate_raw),
-            ]
-            _run_command(concat_reencode_cmd, cwd=job_dir)
-            concat_mode = "reencode"
+        _run_command(concat_reencode_cmd, cwd=job_dir)
+        concat_mode = "reencode"
 
     if not intermediate_raw.exists():
         return {"status": "skipped", "reason": "ffmpeg_output_not_produced"}

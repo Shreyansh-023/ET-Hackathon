@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -81,13 +82,170 @@ def _resolve_intermediate_video(job_dir: Path) -> Path:
     raise ValidationPipelineError("No intermediate render output found. Run render stage first.")
 
 
+def _parse_srt(srt_path: Path) -> list[dict]:
+    """Parse an SRT file into a list of {start, end, text} dicts (times in seconds)."""
+    content = srt_path.read_text(encoding="utf-8")
+    blocks = re.split(r"\n\s*\n", content.strip())
+    entries = []
+    for block in blocks:
+        lines = block.strip().splitlines()
+        if len(lines) < 3:
+            continue
+        time_match = re.match(
+            r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})",
+            lines[1],
+        )
+        if not time_match:
+            continue
+        g = [int(x) for x in time_match.groups()]
+        start = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
+        end = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
+        text = " ".join(lines[2:]).strip()
+        if text:
+            entries.append({"start": start, "end": end, "text": text})
+    return entries
+
+
+def _escape_drawtext(text: str) -> str:
+    """Escape special characters for ffmpeg drawtext filter script syntax."""
+    text = text.replace("\\", "\\\\")
+    text = text.replace("'", "\u2019")  # replace apostrophes with unicode right single quote
+    text = text.replace(":", "\\:")
+    text = text.replace(";", "\\;")
+    text = text.replace("%", "%%")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+    return text
+
+
+def _build_drawtext_filter_script(srt_path: Path, job_dir: Path) -> Path:
+    """Build a drawtext filter script file from SRT — works without libass.
+
+    Returns the path to the filter script file.
+    """
+    entries = _parse_srt(srt_path)
+    script_path = job_dir / "renders" / "subtitle_filter.txt"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not entries:
+        script_path.write_text("null", encoding="utf-8")
+        return script_path
+
+    filters = []
+    for entry in entries:
+        escaped = _escape_drawtext(entry["text"])
+        start = entry["start"]
+        end = entry["end"]
+        # News-style subtitle: white text, semi-transparent dark box, bottom-center
+        dt = (
+            f"drawtext=text='{escaped}'"
+            f":fontsize=24"
+            f":fontcolor=white"
+            f":borderw=2"
+            f":bordercolor=black"
+            f":box=1"
+            f":boxcolor=black@0.6"
+            f":boxborderw=8"
+            f":x=(w-text_w)/2"
+            f":y=h-th-40"
+            f":enable='between(t\\,{start:.3f}\\,{end:.3f})'"
+        )
+        filters.append(dt)
+
+    script_path.write_text(",\n".join(filters), encoding="utf-8")
+    return script_path
+
+
 def _build_subtitle_filter(subtitles_path: Path) -> str:
+    """Use libass subtitles filter if available."""
     resolved = subtitles_path.resolve().as_posix()
     if len(resolved) >= 2 and resolved[1] == ":":
-        # ffmpeg filter parser needs escaped drive-letter colon on Windows.
         resolved = f"{resolved[0]}\\:{resolved[2:]}"
     path_value = resolved.replace("'", "\\'")
     return f"subtitles='{path_value}'"
+
+
+def _has_subtitle_filter() -> bool:
+    """Check if ffmpeg was built with the subtitles (libass) filter."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-filters"],
+            capture_output=True, text=True, check=False,
+        )
+        return "subtitles" in (result.stdout or "")
+    except OSError:
+        return False
+
+
+def _find_project_asset(patterns: list[str], keywords: list[str]) -> Path | None:
+    """Find a file in the project root matching patterns and keywords."""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    for pattern in patterns:
+        for candidate in project_root.glob(pattern):
+            name_lower = candidate.name.lower()
+            if any(kw in name_lower for kw in keywords):
+                return candidate
+    return None
+
+
+def _find_background_music() -> Path | None:
+    return _find_project_asset(
+        ["*.mp3", "*.wav", "*.aac", "*.m4a"],
+        ["music", "intro", "royalty"],
+    )
+
+
+def _find_background_video() -> Path | None:
+    return _find_project_asset(
+        ["Background.mp4", "background.mp4", "Background*.mp4", "background*.mp4"],
+        ["background"],
+    )
+
+
+def _find_header_image() -> Path | None:
+    return _find_project_asset(
+        ["Main header.*", "main header.*", "Main_header.*", "header.*"],
+        ["header"],
+    )
+
+
+def _read_headline(job_dir: Path) -> str:
+    """Read the news headline from the storyboard output."""
+    understanding_path = job_dir / "storyboard" / "article_understanding.json"
+    if understanding_path.exists():
+        try:
+            with understanding_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            return str(data.get("headline", "")).strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _escape_drawtext_value(text: str) -> str:
+    """Escape text for use inside ffmpeg drawtext filter value."""
+    text = text.replace("\\", "\\\\\\\\")
+    text = text.replace("'", "\u2019")
+    text = text.replace(":", "\\\\:")
+    text = text.replace("%", "%%%%")
+    return text
+
+
+def _wrap_headline(text: str, max_chars: int = 38) -> list[str]:
+    """Word-wrap headline text into lines that fit the canvas width."""
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        if len(current) + 1 + len(word) <= max_chars:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
 
 
 def _render_final(
@@ -98,14 +256,216 @@ def _render_final(
     burn_subtitles: bool,
 ) -> Path:
     final_path = job_dir / "renders" / "final.mp4"
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(input_video),
-    ]
-    if burn_subtitles and subtitles_path and subtitles_path.exists():
-        cmd.extend(["-vf", _build_subtitle_filter(subtitles_path)])
+    can_burn = burn_subtitles and subtitles_path and subtitles_path.exists()
+    bg_music = _find_background_music()
+    bg_video = _find_background_video()
+    header_img = _find_header_image()
+    headline = _read_headline(job_dir)
+
+    # --- Build inputs ---
+    cmd = ["ffmpeg", "-y"]
+
+    # Input 0: pipeline video
+    cmd.extend(["-i", str(input_video)])
+
+    # Input 1: background video (looped, no audio)
+    input_bg_idx = None
+    if bg_video:
+        input_bg_idx = 1
+        cmd.extend(["-stream_loop", "-1", "-i", str(bg_video)])
+
+    # Input 2: header image
+    input_header_idx = None
+    if header_img:
+        input_header_idx = (input_bg_idx or 0) + 1
+        cmd.extend(["-i", str(header_img)])
+
+    # Input 3: background music
+    input_music_idx = None
+    if bg_music:
+        input_music_idx = (input_header_idx or input_bg_idx or 0) + 1
+        cmd.extend(["-i", str(bg_music)])
+
+    # --- Build filter_complex ---
+    filters = []
+
+    if bg_video or header_img or bg_music:
+        # Output canvas: 1080x1920 (portrait)
+        canvas_w, canvas_h = 1080, 1920
+
+        # Layout measurements
+        top_padding = 25                             # padding above ET header
+        header_h = 161 if header_img else 0        # ET header height
+        header_gap = 15 if header_img else 0       # gap between header and headline
+
+        # Dynamic headline: wrap text and size bar to fit
+        headline_lines = _wrap_headline(headline.upper(), max_chars=38) if headline else []
+        headline_font_size = 46
+        headline_line_h = headline_font_size + 12  # line height with padding
+        headline_bar_padding = 20                  # top+bottom padding inside bar
+        headline_bar_h = (len(headline_lines) * headline_line_h + headline_bar_padding) if headline_lines else 0
+
+        top_section_h = top_padding + header_h + header_gap + headline_bar_h
+        subtitle_area_h = 300                      # space for subtitles below video
+        pipeline_h = int(canvas_w * 1080 / 1920)   # 607
+
+        # Position pipeline video below header+gap+headline, centered in remaining space
+        remaining_h = canvas_h - top_section_h - subtitle_area_h
+        pipeline_y = top_section_h + max(0, (remaining_h - pipeline_h) // 2)
+
+        # 1. Background video
+        if bg_video:
+            filters.append(
+                f"[{input_bg_idx}:v]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+                f"crop={canvas_w}:{canvas_h},setsar=1[bg_scaled]"
+            )
+        else:
+            filters.append(f"color=c=black:s={canvas_w}x{canvas_h}:r=30[bg_scaled]")
+
+        # 2. Scale pipeline video
+        filters.append(f"[0:v]scale={canvas_w}:{pipeline_h},setsar=1[pipeline_scaled]")
+
+        # 3. Header image
+        if header_img:
+            filters.append(f"[{input_header_idx}:v]scale={canvas_w}:-1[header_scaled]")
+
+        # 4. Overlay pipeline on background
+        filters.append(
+            f"[bg_scaled][pipeline_scaled]overlay=0:{pipeline_y}:shortest=1[v1]"
+        )
+        current_v = "v1"
+
+        # 5. Overlay header at top
+        if header_img:
+            filters.append(f"[{current_v}][header_scaled]overlay=0:{top_padding}[v2]")
+            current_v = "v2"
+
+        # 6. Draw headline bar below header with gap (dark bar + multi-line bold text)
+        if headline_lines:
+            bar_y = top_padding + header_h + header_gap
+            # Dark semi-transparent bar
+            filters.append(
+                f"[{current_v}]drawbox=x=0:y={bar_y}:w={canvas_w}:h={headline_bar_h}"
+                f":color=black@0.80:t=fill[v3a]"
+            )
+            # Thin red accent line at top of headline bar
+            filters.append(
+                f"[v3a]drawbox=x=0:y={bar_y}:w={canvas_w}:h=4"
+                f":color=0xCC0000@1.0:t=fill[v3b]"
+            )
+            current_v = "v3b"
+
+            # Render each headline line centered in the bar
+            text_block_h = len(headline_lines) * headline_line_h
+            text_start_y = bar_y + (headline_bar_h - text_block_h) // 2
+
+            for i, line in enumerate(headline_lines):
+                escaped_line = _escape_drawtext_value(line)
+                line_y = text_start_y + i * headline_line_h
+                tag = f"v3_line{i}"
+                filters.append(
+                    f"[{current_v}]drawtext=text='{escaped_line}'"
+                    f":fontsize={headline_font_size}:fontcolor=white"
+                    f":borderw=1:bordercolor=white"
+                    f":x=(w-text_w)/2:y={line_y}[{tag}]"
+                )
+                current_v = tag
+
+        # 7. News broadcast-style subtitles below the video
+        #    Professional look: dark box, white text, red accent bar on left,
+        #    word-wrapped to max 2 lines, positioned in dedicated subtitle area.
+        if can_burn and subtitles_path and subtitles_path.exists():
+            srt_entries = _parse_srt(subtitles_path)
+            sub_font_size = 34
+            sub_line_h = sub_font_size + 14      # line height with spacing
+            sub_box_h = sub_line_h * 2 + 24      # 2 lines + top/bottom padding
+            sub_box_y = pipeline_y + pipeline_h + 20  # 20px gap below video
+            sub_box_x = 40                       # left margin
+            sub_box_w = canvas_w - 80            # 40px margin each side
+            accent_w = 6                         # red accent bar width
+            sub_text_x = sub_box_x + accent_w + 16  # text starts after accent+padding
+            max_sub_chars = 44                   # chars per line before wrapping
+
+            # Persistent subtitle background box (always visible, like a lower-third)
+            filters.append(
+                f"[{current_v}]drawbox=x={sub_box_x}:y={sub_box_y}"
+                f":w={sub_box_w}:h={sub_box_h}"
+                f":color=black@0.75:t=fill[v_sub_bg]"
+            )
+            # Red accent bar on left edge of box
+            filters.append(
+                f"[v_sub_bg]drawbox=x={sub_box_x}:y={sub_box_y}"
+                f":w={accent_w}:h={sub_box_h}"
+                f":color=0xCC0000@1.0:t=fill[v_sub_accent]"
+            )
+            current_v = "v_sub_accent"
+
+            for si, entry in enumerate(srt_entries):
+                # Word-wrap subtitle text to max 2 lines
+                words = entry["text"].split()
+                lines: list[str] = []
+                cur_line = ""
+                for word in words:
+                    test = (cur_line + " " + word).strip()
+                    if len(test) <= max_sub_chars:
+                        cur_line = test
+                    else:
+                        if cur_line:
+                            lines.append(cur_line)
+                        cur_line = word
+                        if len(lines) >= 2:
+                            break
+                if cur_line and len(lines) < 2:
+                    lines.append(cur_line)
+                if not lines:
+                    continue
+
+                start_t = entry["start"]
+                end_t = entry["end"]
+
+                for li, line_text in enumerate(lines):
+                    escaped = _escape_drawtext_value(line_text)
+                    line_y = sub_box_y + 12 + li * sub_line_h
+                    tag = f"v_s{si}l{li}"
+                    filters.append(
+                        f"[{current_v}]drawtext=text='{escaped}'"
+                        f":fontsize={sub_font_size}"
+                        f":fontcolor=white"
+                        f":borderw=1:bordercolor=black"
+                        f":x={sub_text_x}"
+                        f":y={line_y}"
+                        f":enable='between(t\\,{start_t:.3f}\\,{end_t:.3f})'"
+                        f"[{tag}]"
+                    )
+                    current_v = tag
+
+        # 8. Audio: mix narration + background music (increased bg volume)
+        if bg_music:
+            filters.append(f"[0:a]volume=1.0[narration]")
+            filters.append(
+                f"[{input_music_idx}:a]volume=0.22,"
+                f"afade=t=in:st=0:d=2,afade=t=out:st=0:d=3[bgm]"
+            )
+            filters.append(
+                f"[narration][bgm]amix=inputs=2:duration=shortest:dropout_transition=3,"
+                f"loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
+            )
+        else:
+            filters.append(f"[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
+
+        filter_str = ";\n".join(filters)
+        cmd.extend(["-filter_complex", filter_str])
+        cmd.extend(["-map", f"[{current_v}]", "-map", "[aout]"])
+
+    else:
+        # No background video/header/music — simple pass-through with subtitles
+        if can_burn:
+            if _has_subtitle_filter():
+                cmd.extend(["-vf", _build_subtitle_filter(subtitles_path)])
+            else:
+                script_path = _build_drawtext_filter_script(subtitles_path, job_dir)
+                cmd.extend(["-filter_script:v", str(script_path)])
+        cmd.extend(["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"])
 
     cmd.extend(
         [
@@ -119,8 +479,6 @@ def _render_final(
             "aac",
             "-b:a",
             "192k",
-            "-af",
-            "loudnorm=I=-16:TP=-1.5:LRA=11",
             "-movflags",
             "+faststart",
             str(final_path),

@@ -15,6 +15,7 @@ class PipelineConfig:
     cache_root: str
     nvidia_api_key: str
     gemini_api_key: str
+    gemini_visual_api_key: str
     gemini_model: str
     groq_api_key: str
     groq_base_url: str
@@ -46,6 +47,7 @@ def load_config() -> PipelineConfig:
         cache_root=_env("CACHE_ROOT", ".cache/news2video"),
         nvidia_api_key=_env("NVIDIA_API_KEY"),
         gemini_api_key=_env("GEMINI_API_KEY"),
+        gemini_visual_api_key=_env("GEMINI_VISUAL_API_KEY"),
         gemini_model=_env("GEMINI_MODEL", "gemini-2.5-flash"),
         groq_api_key=_env("GROQ_API_KEY"),
         groq_base_url=_env("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),

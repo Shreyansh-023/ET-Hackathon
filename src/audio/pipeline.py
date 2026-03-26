@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 import io
@@ -97,7 +98,8 @@ def _build_fallback_silence_audio(sentences: list[str]) -> tuple[int, int, bytes
     return sample_rate, sample_width, bytes(frames), timings
 
 
-def _synthesize_riva_sentence(sentence: str, cfg: PipelineConfig) -> bytes:
+def _make_riva_service(cfg: PipelineConfig):
+    """Create a reusable Riva TTS service + auth object."""
     try:
         import riva.client  # type: ignore
     except Exception as exc:  # pragma: no cover - environment dependent
@@ -111,20 +113,47 @@ def _synthesize_riva_sentence(sentence: str, cfg: PipelineConfig) -> bytes:
             ["authorization", f"Bearer {cfg.nvidia_riva_api_key}"],
         ],
     )
-    service = riva.client.SpeechSynthesisService(auth)
+    return riva.client.SpeechSynthesisService(auth)
+
+
+_RIVA_MAX_RETRIES = 5
+_RIVA_BASE_DELAY = 2.0  # seconds
+
+
+def _synthesize_riva_sentence(sentence: str, cfg: PipelineConfig, *, service=None) -> bytes:
+    import riva.client  # type: ignore
+
+    if service is None:
+        service = _make_riva_service(cfg)
 
     # Chunk the sentence into pieces of 300 characters or less
     chunks = [sentence[i:i + 300] for i in range(0, len(sentence), 300)]
     audio_chunks = []
 
     for chunk in chunks:
-        response = service.synthesize(
-            text=chunk,
-            language_code=cfg.nvidia_riva_language,
-            voice_name=cfg.nvidia_riva_voice,
-            sample_rate_hz=22050,
-            encoding=riva.client.AudioEncoding.LINEAR_PCM,
-        )
+        last_exc = None
+        for attempt in range(_RIVA_MAX_RETRIES):
+            try:
+                response = service.synthesize(
+                    text=chunk,
+                    language_code=cfg.nvidia_riva_language,
+                    voice_name=cfg.nvidia_riva_voice,
+                    sample_rate_hz=22050,
+                    encoding=riva.client.AudioEncoding.LINEAR_PCM,
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                err_str = str(exc).lower()
+                if "rate limit" in err_str or "resource_exhausted" in err_str:
+                    delay = _RIVA_BASE_DELAY * (2 ** attempt)
+                    time.sleep(delay)
+                else:
+                    raise ProviderPipelineError(f"Riva TTS failed: {exc}") from exc
+        else:
+            raise ProviderPipelineError(
+                f"Riva TTS rate limit exceeded after {_RIVA_MAX_RETRIES} retries"
+            ) from last_exc
 
         audio = getattr(response, "audio", None)
         if not isinstance(audio, (bytes, bytearray)) or not audio:
@@ -342,8 +371,11 @@ def build_voiceover_and_subtitles(
         sample_width = 2
         timeline = 0.0
         sentence_timings: list[SentenceTiming] = []
-        for sentence in sentences:
-            pcm_bytes = _synthesize_riva_sentence(sentence, cfg)
+        riva_service = _make_riva_service(cfg)
+        for idx, sentence in enumerate(sentences):
+            if idx > 0:
+                time.sleep(0.5)  # pace requests to avoid rate limits
+            pcm_bytes = _synthesize_riva_sentence(sentence, cfg, service=riva_service)
             duration = len(pcm_bytes) / (sample_rate * sample_width)
             sentence_timings.append(
                 SentenceTiming(
@@ -398,7 +430,8 @@ def build_voiceover_and_subtitles(
         overflow = normalized_lines[-1].end - duration_seconds
         if overflow > 0.0:
             last = normalized_lines[-1]
-            normalized_lines[-1] = SentenceTiming(text=last.text, start=last.start, end=last.end - overflow)
+            clamped_end = max(last.start + 0.1, last.end - overflow)
+            normalized_lines[-1] = SentenceTiming(text=last.text, start=last.start, end=round(clamped_end, 3))
 
     subtitles_srt_rel_path = "audio/subtitles.srt"
     subtitles_vtt_rel_path = "audio/subtitles.vtt"

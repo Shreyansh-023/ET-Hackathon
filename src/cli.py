@@ -107,7 +107,7 @@ def plan(
         job_dir = repo.job_path(job_id)
         article_payload = _read_json(job_dir / "parsed" / "article.json")
         article = validate_payload(Article, article_payload)
-        llm_enabled = bool(cfg.nvidia_api_key) and not dry_run
+        llm_enabled = bool(cfg.gemini_api_key) and not dry_run
         _, scenes = plan_storyboard(article, cfg, job_dir=job_dir, llm_enabled=llm_enabled)
         for scene in scenes:
             validate_payload(Scene, scene.model_dump())
@@ -180,29 +180,16 @@ def render(
         job_dir = repo.job_path(job_id)
         logger = repo.get_stage_logger(job_id, "render")
         render_payload = build_render_stage(job_id, cfg, job_dir=job_dir, logger=logger)
-        export_payload = build_export_package(job_id, cfg, job_dir=job_dir, logger=logger)
 
-        merged_payload = {
-            **render_payload,
-            "final": export_payload["final"],
-            "preview": export_payload["preview"],
-            "thumbnail": export_payload["thumbnail"],
-            "render_report": export_payload["render_report"],
-        }
-
-        if "job_id" not in merged_payload:
+        if "job_id" not in render_payload:
             raise RenderPipelineError("Render payload missing job_id")
 
-        _write_json(job_dir / "renders" / "render_job.json", merged_payload)
+        _write_json(job_dir / "renders" / "render_job.json", render_payload)
         repo.add_artifact(job_id, "render_job", "renders/render_job.json")
         repo.add_artifact(job_id, "scene_manifest", "renders/scene_manifest.json")
         repo.add_artifact(job_id, "intermediate_raw", "renders/intermediate_raw.mp4")
         repo.add_artifact(job_id, "intermediate_with_audio", "renders/intermediate_with_audio.mp4")
-        repo.add_artifact(job_id, "final", export_payload["final"])
-        repo.add_artifact(job_id, "preview", export_payload["preview"])
-        repo.add_artifact(job_id, "thumbnail", export_payload["thumbnail"])
-        repo.add_artifact(job_id, "render_report", export_payload["render_report"])
-        return merged_payload
+        return render_payload
 
     try:
         _run_stage(repo, job_id, "render", cfg.retry_limits["render"], _work)

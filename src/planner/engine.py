@@ -134,58 +134,84 @@ def _generate_storyboard_with_gemini(
 ) -> tuple[list[dict[str, Any]], str, str, ArticleUnderstanding]:
     prompt = _build_gemini_storyboard_prompt(article)
     if not llm_enabled:
-        # This is a stub for dry-run mode, will need a more robust fallback
         understanding = _article_understanding_from_text(article)
         scenes = [scene.model_dump() for scene in _fallback_template_plan(article, understanding)]
         return scenes, prompt, json.dumps({"scenes": scenes}, indent=2), understanding
 
+    # --- Call 1: Script generation (original API key) ---
     raw = _call_gemini(cfg, prompt)
-    
+
     try:
         payload = _extract_json_payload(raw)
-        
-        # Create a simplified ArticleUnderstanding
-        understanding = ArticleUnderstanding(
-            headline=payload.get("headline", article.title or "Untitled"),
-            summary=payload.get("summary", ""),
-            key_points=[],
-            entities=[],
-            visual_hooks=[],
-            tone="informative",
-            topic="news"
-        )
-
+        understanding = _understanding_from_payload(payload, article)
         rows = _normalize_storyboard_rows(payload)
     except Exception as exc:
         repair_prompt = _build_repair_prompt(raw, exc, "storyboard")
         repaired_raw = _call_gemini(cfg, repair_prompt)
         payload = _extract_json_payload(repaired_raw)
-        
-        understanding = ArticleUnderstanding(
-            headline=payload.get("headline", article.title or "Untitled"),
-            summary=payload.get("summary", ""),
-            key_points=[],
-            entities=[],
-            visual_hooks=[],
-            tone="informative",
-            topic="news"
-        )
-        
+        understanding = _understanding_from_payload(payload, article)
         rows = _normalize_storyboard_rows(payload)
-        return (
-            rows,
-            prompt + "\n\n--- REPAIR PROMPT ---\n" + repair_prompt,
-            f"# Provider: Gemini\n{raw}\n\n{repaired_raw}",
-            understanding,
+        raw = f"{raw}\n\n# Repaired:\n{repaired_raw}"
+
+    # --- Call 2: Visual planning (second API key) ---
+    visual_prompt = _build_gemini_visual_prompt(article, rows)
+    prompt_combined = prompt + "\n\n--- VISUAL PLANNING PROMPT ---\n" + visual_prompt
+
+    try:
+        visual_raw = _call_gemini_visual(cfg, visual_prompt)
+        visual_plan = _extract_json_payload(visual_raw)
+        if isinstance(visual_plan, dict) and "scenes" in visual_plan:
+            visual_plan = visual_plan["scenes"]
+        if isinstance(visual_plan, list):
+            rows = _merge_visual_suggestions(rows, visual_plan)
+        raw_combined = f"# Provider: Gemini (Script)\n{raw}\n\n# Provider: Gemini (Visual Plan)\n{visual_raw}"
+    except Exception as visual_exc:
+        # Visual planning failure is non-fatal — scenes keep empty visual_suggestions
+        raw_combined = (
+            f"# Provider: Gemini (Script)\n{raw}\n\n"
+            f"# Provider: Gemini (Visual Plan) — FAILED\n{type(visual_exc).__name__}: {visual_exc}"
         )
 
-    return rows, prompt, f"# Provider: Gemini\n{raw}", understanding
+    return rows, prompt_combined, raw_combined, understanding
+
+
+def _understanding_from_payload(payload: dict[str, Any], article: Article) -> ArticleUnderstanding:
+    headline = payload.get("headline", article.title or "Untitled")
+    summary = payload.get("summary", "")
+    # Ensure at least one key point so min_length=1 constraint is satisfied.
+    raw_kps = payload.get("key_points", [])
+    key_points = []
+    if isinstance(raw_kps, list):
+        for kp in raw_kps:
+            if isinstance(kp, dict) and kp.get("text"):
+                key_points.append(kp)
+            elif isinstance(kp, str) and kp.strip():
+                key_points.append({"text": kp.strip(), "importance": 3})
+    if not key_points:
+        key_points = [{"text": summary or headline, "importance": 3}]
+
+    return ArticleUnderstanding(
+        headline=headline,
+        summary=summary or "No summary available.",
+        key_points=key_points,
+        entities=payload.get("entities", []) if isinstance(payload.get("entities"), list) else [],
+        visual_hooks=payload.get("visual_hooks", []) if isinstance(payload.get("visual_hooks"), list) else [],
+        tone=payload.get("tone", "informative"),
+        topic=payload.get("topic", "news"),
+    )
 
 
 def _build_gemini_storyboard_prompt(article: Article) -> str:
     return (
-        "You are a video producer creating a 90-second news summary video. "
-        "Analyze the provided article and generate a complete storyboard and visual plan in a single JSON object. "
+        "You are a professional TV news anchor and broadcast producer. "
+        "Your job is to turn the provided article into a 90-second news broadcast segment — "
+        "the kind you would see on CNN, BBC, or Al Jazeera. "
+        "Write all narration in the authoritative, clear, and measured tone of a news anchor delivering a live report. "
+        "Use short, punchy sentences. Open with a strong hook that grabs attention. "
+        "Address the viewer directly where appropriate (e.g. 'Here's what we know so far'). "
+        "Keep the language factual, avoid sensationalism, and maintain journalistic neutrality. "
+        "On-screen text should resemble news lower-thirds and headline chyrons (brief, high-impact phrases — not full sentences). "
+        "Focus ONLY on writing the script — narration and on-screen text. Do NOT include any visual suggestions, image queries, or image prompts. "
         "Return ONLY the JSON object, with no additional text or markdown formatting.\n\n"
         "The JSON object should have this exact schema:\n"
         "{\n"
@@ -195,28 +221,107 @@ def _build_gemini_storyboard_prompt(article: Article) -> str:
         "    {\n"
         '      "id": "scene-001",\n'
         '      "narration": "string",\n'
-        '      "on_screen_text": "string",\n'
-        '      "visual_suggestions": {\n'
-        '          "type": "photo|graph|chart|map",\n'
-        '          "description": "A detailed description of the visual.",\n'
-        '          "pexels_search_queries": ["query1", "query2"],\n'
-        '          "replicate_prompt": "A prompt for an AI image generator if needed."\n'
-        '      }\n'
+        '      "on_screen_text": "string"\n'
         "    }\n"
         "  ]\n"
         "}\n\n"
         "Guidelines:\n"
         "- The total video duration should be approximately 90 seconds.\n"
         "- Create 8-12 scenes.\n"
-        "- For `visual_suggestions.type`:\n"
-        "  - Use 'photo' for general stock imagery.\n"
-        "  - Use 'graph', 'chart', or 'map' for data visualizations or geographical context mentioned in the article. Only use these if the article explicitly contains data, figures, or locations that would benefit from a visual representation.\n"
-        "- For `pexels_search_queries`, provide 2-3 diverse and specific queries for finding stock photos on Pexels.\n"
-        "- For `replicate_prompt`, only provide a prompt if the `type` is 'graph', 'chart', or 'map'. The prompt should be detailed enough for an AI image generator (like Replicate with Flux 1.1 Pro) to create the specific visualization.\n"
+        "- Write narration exactly as a news anchor would read it on-air: confident, concise, and conversational but professional.\n"
+        "- Scene 1 must be a compelling news hook (e.g. 'Breaking tonight…', 'A major development today…').\n"
+        "- The final scene should wrap up like a broadcast sign-off with a forward-looking statement or call to stay tuned.\n"
+        "- On-screen text should be short headline/chyron style, NOT a copy of the narration.\n"
         "- Ensure the narration flows logically and tells a coherent story based on the article.\n\n"
         f"Article Title: {article.title or 'Untitled'}\n"
         f"Article Text:\n{article.clean_article_text}"
     )
+
+
+def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, Any]]) -> str:
+    scenes_text = json.dumps(scenes_json, indent=2)
+    return (
+        "You are an expert visual researcher and news broadcast art director. "
+        "You are given a news article and its scene-by-scene script (narration + on-screen text). "
+        "Your job is to generate highly specific, detailed image search queries and AI image generation prompts "
+        "for each scene so that the visuals closely match what a real TV news broadcast would show.\n\n"
+        "Return ONLY a JSON array with one object per scene. Each object must have this schema:\n"
+        "{\n"
+        '  "id": "scene-001",\n'
+        '  "visual_type": "photo|graph|chart|map",\n'
+        '  "description": "A detailed description of the ideal visual for this scene.",\n'
+        '  "pexels_search_queries": ["query1", "query2", "query3"],\n'
+        '  "replicate_prompt": "Detailed AI image generation prompt (only for graph/chart/map types, empty string for photo)"\n'
+        "}\n\n"
+        "Guidelines for pexels_search_queries:\n"
+        "- Provide exactly 3 queries per scene.\n"
+        "- Be VERY specific and descriptive — generic queries like 'politics' or 'war' return irrelevant results.\n"
+        "- Include real names, locations, objects mentioned in the narration (e.g. 'Strait of Hormuz aerial view', 'White House press briefing room', 'Iranian parliament building exterior').\n"
+        "- Each query should approach the visual from a different angle (e.g. a wide establishing shot, a close-up detail, a symbolic image).\n"
+        "- Think about what a news editor would actually search for to illustrate this exact sentence.\n"
+        "- Avoid abstract or metaphorical queries — use concrete, searchable terms.\n\n"
+        "Guidelines for visual_type:\n"
+        "- Use 'photo' for most scenes — stock photos are the default.\n"
+        "- Use 'map' ONLY when the narration explicitly references a geographic location that benefits from a map view.\n"
+        "- Use 'graph' or 'chart' ONLY when the narration includes specific data, numbers, or statistics.\n\n"
+        "Guidelines for replicate_prompt (AI-generated images):\n"
+        "- Only provide a non-empty prompt when visual_type is 'graph', 'chart', or 'map'.\n"
+        "- For maps: describe the exact region, labels, style (e.g. 'Clean satellite-style map of the Persian Gulf showing the Strait of Hormuz highlighted in red, with Iran and Oman labeled, news broadcast style').\n"
+        "- For graphs/charts: describe data, axis labels, colors, chart type, news-graphic style.\n"
+        "- For photos: leave replicate_prompt as an empty string \"\".\n\n"
+        f"Article Title: {article.title or 'Untitled'}\n"
+        f"Article Text:\n{article.clean_article_text}\n\n"
+        f"Scene Script:\n{scenes_text}"
+    )
+
+
+def _call_gemini_visual(cfg: PipelineConfig, prompt: str) -> str:
+    """Call Gemini with the second (visual) API key."""
+    api_key = cfg.gemini_visual_api_key or cfg.gemini_api_key
+    if not api_key:
+        raise ProviderPipelineError("No Gemini API key configured for visual planning")
+    if genai is None or genai_types is None:
+        raise ProviderPipelineError("google-genai is not installed")
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=cfg.gemini_model,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                temperature=0.3,
+                response_mime_type="application/json",
+            ),
+        )
+    except Exception as exc:
+        raise ProviderPipelineError(f"Gemini visual request failed: {exc}") from exc
+
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    raise ProviderPipelineError("Gemini visual planner returned an empty response")
+
+
+def _merge_visual_suggestions(
+    scene_rows: list[dict[str, Any]],
+    visual_plan: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge visual suggestions from the second Gemini call into scene rows."""
+    visual_by_id = {}
+    for entry in visual_plan:
+        if isinstance(entry, dict) and entry.get("id"):
+            visual_by_id[entry["id"]] = entry
+
+    for row in scene_rows:
+        scene_id = row.get("id") or row.get("scene_id")
+        visual = visual_by_id.get(scene_id, {})
+        row["visual_suggestions"] = {
+            "type": visual.get("visual_type", "photo"),
+            "description": visual.get("description", "Editorial news visual"),
+            "pexels_search_queries": visual.get("pexels_search_queries", []),
+            "replicate_prompt": visual.get("replicate_prompt", ""),
+        }
+    return scene_rows
 
 
 def _build_repair_prompt(raw: str, error: Exception, target: str) -> str:

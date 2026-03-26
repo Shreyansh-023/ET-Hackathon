@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ffmpeg -filters)",
+      "Bash(brew info:*)",
+      "Bash(brew uninstall:*)",
+      "Bash(brew install:*)"
+    ]
+  }
+}

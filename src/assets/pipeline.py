@@ -288,10 +288,10 @@ def _call_replicate(prompt: str, cfg: PipelineConfig) -> dict[str, Any] | None:
             raise ProviderPipelineError(f"Replicate polling failed: {exc}") from exc
         if poll.status_code >= 400:
             return None
-        payload = poll.json()
-        status = payload.get("status")
+        poll_data = poll.json()
+        status = poll_data.get("status")
         if status == "succeeded":
-            return payload if isinstance(payload, dict) else None
+            return poll_data if isinstance(poll_data, dict) else None
         if status in {"failed", "canceled"}:
             return None
         time.sleep(1.0)
