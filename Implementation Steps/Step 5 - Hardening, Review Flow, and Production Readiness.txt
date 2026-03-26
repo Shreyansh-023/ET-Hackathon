@@ -1,0 +1,108 @@
+STEP 5: HARDENING, REVIEW FLOW, AND PRODUCTION READINESS
+
+What Was Already Done in Steps 1-4
+- Structured pipeline from ingest to final render is implemented.
+- Planner and storyboard logic are functional and schema-validated.
+- Asset, voiceover, and subtitle systems are integrated.
+- Blender composition and MP4 export are operational.
+
+Goal
+Harden the system for reliability, safety, observability, and repeatable production use.
+
+How To Do (Implementation)
+1) Reuse full pipeline from Steps 1-4
+- Start from existing ingest -> plan -> assets -> render -> export flow.
+- Add hardening as wrappers around existing stage functions, not a rewrite.
+
+2) Reliability and retry hardening
+- Add bounded retries per stage with stage-specific backoff.
+- Add idempotency keys per stage output so retries do not duplicate assets.
+- Add resume-from-last-successful-stage logic using persisted job state.
+
+3) Human-in-the-loop review checkpoints
+- Add optional pause points after:
+  - plan
+  - assets
+  - pre-render
+- At each checkpoint, allow operator to:
+  - approve as-is
+  - replace chosen asset
+  - edit scene text
+  - lock scene timing
+- Persist review decisions in job review file so reruns are deterministic.
+
+4) Safety and editorial controls
+- Add sensitive-topic mode that forces conservative visual strategy.
+- For AI-generated images, set synthetic=true metadata in assets registry and manifest.
+- Store source and attribution/provenance fields for every asset.
+
+5) Observability and QA
+- Add metrics per stage:
+  - duration
+  - retries
+  - success/failure code
+- Add automated QA checks:
+  - scene timing continuity
+  - subtitle overlap detection
+  - audio clipping detection
+- Save checksums for key artifacts (storyboard, asset registry, final render) to support reproducibility.
+
+6) Batch and worker mode
+- Accept list input (multiple articles) and enqueue jobs.
+- Process jobs with configurable concurrency.
+- Emit run summary report with per-job outcome and failure reasons.
+
+7) Security and operations note
+- Keep secrets in environment only and never in committed files.
+- Rotate provider keys regularly and support key override per run.
+
+What This Step Implements
+1. Reliability and fallback hardening
+- Add bounded retries per stage with backoff policies.
+- Add idempotency keys for generation-heavy stages.
+- Improve partial failure reporting and recovery resume points.
+
+2. Human-in-the-loop review checkpoints
+- Add optional review gates:
+  - after plan
+  - after assets
+  - before render
+- Support manual overrides for scene text, selected asset, and timing locks.
+
+3. Safety and editorial guardrails
+- Add sensitive-topic policy mode for conservative visuals.
+- Add synthetic-image labeling in manifest.
+- Add provenance and attribution fields to all visual assets.
+
+4. Observability and QA
+- Add stage latency metrics and failure reason taxonomy.
+- Add quality checks:
+  - timing continuity
+  - subtitle overlap checks
+  - audio clipping checks
+- Add checksum/hash records for reproducibility.
+
+5. Batch and operations readiness
+- Add batch run support from article list input.
+- Add queue worker mode and concurrency controls.
+- Add run summary report for operations leads.
+
+Deliverables
+- Production-hardened pipeline with optional review mode
+- Enhanced monitoring + quality gates
+- Batch-capable execution mode
+
+Acceptance Criteria
+- Failed jobs can resume from last stable stage.
+- Review gates can pause and continue jobs safely.
+- System emits actionable logs/metrics for each stage.
+- Batch run of multiple articles completes with per-job reports.
+
+Out of Scope for Step 5
+- Full collaborative web editor
+- Marketplace ecosystem and distributed rendering fabric at internet scale
+
+HIGHLIGHT: Improvement Suggestions
+- Add a "confidence score" per scene combining factual alignment, asset relevance, and subtitle quality.
+- Add golden regression tests with fixed seeds to detect visual/style drift over time.
+- Define SLA targets now (for example, p95 end-to-end generation time) before scaling to teams.

@@ -1,0 +1,679 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+from typing import Any
+
+from src.common.config import PipelineConfig
+from src.common.errors import RenderPipelineError, ValidationPipelineError
+from src.common.models import Scene
+from src.common.validation import validate_payload
+
+
+SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg"}
+SCENE_TEMPLATES = {
+    "headline_card": "headline_card",
+    "image_text_split": "image_plus_text_split",
+    "quote_card": "quote_card",
+    "bullet_scene": "bullet_scene",
+    "outro_card": "outro_card",
+}
+
+
+def _read_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def _run_command(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> None:
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise RenderPipelineError(f"Failed running command: {' '.join(cmd)} ({exc})") from exc
+
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        stdout = (completed.stdout or "").strip()
+        details = stderr or stdout or "Unknown command failure"
+        raise RenderPipelineError(f"Command failed ({completed.returncode}): {' '.join(cmd)} :: {details[:1200]}")
+
+
+def _aspect_to_dimensions(aspect_ratio: str) -> tuple[int, int]:
+    normalized = aspect_ratio.strip()
+    if normalized == "16:9":
+        return 1920, 1080
+    if normalized == "1:1":
+        return 1080, 1080
+    # Default mobile-first profile.
+    return 1080, 1920
+
+
+def _load_scenes(job_dir: Path) -> list[Scene]:
+    scenes_path = job_dir / "storyboard" / "scenes.json"
+    storyboard_path = job_dir / "storyboard" / "storyboard.json"
+
+    payload: Any
+    if scenes_path.exists():
+        payload = _read_json(scenes_path)
+        if not isinstance(payload, list):
+            raise ValidationPipelineError("storyboard/scenes.json must be a JSON array")
+    elif storyboard_path.exists():
+        blob = _read_json(storyboard_path)
+        payload = blob.get("scenes") if isinstance(blob, dict) else None
+        if not isinstance(payload, list):
+            raise ValidationPipelineError("storyboard/storyboard.json must include a scenes array")
+    else:
+        raise ValidationPipelineError(f"Missing storyboard scenes file: {scenes_path} or {storyboard_path}")
+
+    return [validate_payload(Scene, row) for row in payload]
+
+
+def _load_assets_by_scene(job_dir: Path) -> dict[str, dict[str, Any]]:
+    registry_path = job_dir / "assets" / "assets_registry.json"
+    if not registry_path.exists():
+        raise ValidationPipelineError(f"Missing assets registry: {registry_path}")
+
+    payload = _read_json(registry_path)
+    rows = payload.get("assets") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValidationPipelineError("assets_registry.json must contain an assets array")
+
+    by_scene: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        scene_id = str(row.get("scene_id", "")).strip()
+        if not scene_id:
+            continue
+        by_scene[scene_id] = row
+    return by_scene
+
+
+def _choose_template_name(scene: Scene) -> str:
+    if scene.type == "hook":
+        return SCENE_TEMPLATES["headline_card"]
+    if scene.type == "closing":
+        return SCENE_TEMPLATES["outro_card"]
+
+    lower_text = scene.on_screen_text.lower()
+    if "\n-" in scene.on_screen_text or lower_text.count("; ") >= 2:
+        return SCENE_TEMPLATES["bullet_scene"]
+    if '"' in scene.narration or "quote" in lower_text:
+        return SCENE_TEMPLATES["quote_card"]
+    return SCENE_TEMPLATES["image_text_split"]
+
+
+def _build_scene_manifest(
+    job_id: str,
+    scenes: list[Scene],
+    assets_by_scene: dict[str, dict[str, Any]],
+    *,
+    job_dir: Path,
+    fps: int,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    for scene in scenes:
+        asset = assets_by_scene.get(scene.scene_id)
+        if not asset:
+            raise ValidationPipelineError(f"No visual asset for scene {scene.scene_id}")
+
+        rel_image_path = str(asset.get("path", "")).strip()
+        if not rel_image_path:
+            raise ValidationPipelineError(f"Scene {scene.scene_id} has empty asset path")
+
+        abs_image_path = job_dir / rel_image_path
+        if not abs_image_path.exists():
+            raise ValidationPipelineError(f"Scene {scene.scene_id} asset does not exist: {abs_image_path}")
+
+        start_frame = int(round(scene.start * fps))
+        end_frame = int(round(scene.end * fps))
+        if end_frame <= start_frame:
+            end_frame = start_frame + 1
+
+        if abs_image_path.suffix.lower() not in (SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS):
+            warnings.append(
+                f"Scene {scene.scene_id} uses unsupported asset format ({abs_image_path.suffix}); FFmpeg color fallback will be used"
+            )
+
+        rows.append(
+            {
+                "scene_id": scene.scene_id,
+                "template_name": _choose_template_name(scene),
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "image_path": str(abs_image_path),
+                "text_blocks": [scene.on_screen_text, scene.narration],
+                "transition_type": scene.transition_hint or "clean_cut",
+                "motion_parameters": {
+                    "profile": scene.motion_hint or "slow_push_in",
+                    "safe_zone": {"x": 0.08, "y": 0.1, "width": 0.84, "height": 0.8},
+                },
+            }
+        )
+
+    return {
+        "job_id": job_id,
+        "fps": fps,
+        "scene_count": len(rows),
+        "templates": list(SCENE_TEMPLATES.values()),
+        "scenes": rows,
+        "warnings": warnings,
+    }
+
+
+def _transition_mix_frames(transition_hint: str, *, fps: int, left_frames: int, right_frames: int) -> int:
+    hint = transition_hint.strip().lower()
+    if not hint or "cut" in hint or hint in {"none", "clean_cut"}:
+        return 0
+
+    if any(token in hint for token in ("fade", "dissolve", "cross", "mix", "blend")):
+        base = max(1, int(round(fps * 0.25)))
+    else:
+        base = max(1, int(round(fps * 0.2)))
+
+    return min(base, max(1, left_frames // 3), max(1, right_frames // 3))
+
+
+def _ffmpeg_timestamp(seconds: float) -> str:
+    return f"{max(0.0, seconds):.3f}"
+
+
+def _transition_to_xfade(transition_hint: str) -> str:
+    hint = transition_hint.strip().lower()
+    if not hint or hint in {"none", "clean_cut"}:
+        return "fade"
+
+    mapping = {
+        "dissolve": "dissolve",
+        "fade": "fade",
+        "cross": "fade",
+        "wipeleft": "wipeleft",
+        "wiperight": "wiperight",
+        "wipeup": "wipeup",
+        "wipedown": "wipedown",
+        "slideleft": "slideleft",
+        "slideright": "slideright",
+        "smoothleft": "smoothleft",
+        "smoothright": "smoothright",
+        "circle": "circlecrop",
+        "pixel": "pixelize",
+        "zoom": "zoomin",
+    }
+    for token, transition in mapping.items():
+        if token in hint:
+            return transition
+    return "fade"
+
+
+def _build_visual_filter(width: int, height: int, fps: int) -> str:
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+        "setsar=1,"
+        f"fps={fps},"
+        "format=yuv420p"
+    )
+
+
+def _run_ffmpeg_scene_render(
+    *,
+    source_path: Path | None,
+    output_path: Path,
+    duration_seconds: float,
+    width: int,
+    height: int,
+    fps: int,
+) -> str:
+    filter_chain = _build_visual_filter(width, height, fps)
+
+    if source_path is None:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:s={width}x{height}:r={fps}:d={_ffmpeg_timestamp(duration_seconds)}",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            os.getenv("FFMPEG_PRESET", "medium"),
+            "-crf",
+            os.getenv("FFMPEG_CRF", "22"),
+            "-pix_fmt",
+            "yuv420p",
+            str(output_path),
+        ]
+        _run_command(cmd, cwd=output_path.parent)
+        return "color:black"
+
+    suffix = source_path.suffix.lower()
+    if suffix in SUPPORTED_IMAGE_EXTENSIONS:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-loop",
+            "1",
+            "-t",
+            _ffmpeg_timestamp(duration_seconds),
+            "-i",
+            str(source_path),
+            "-vf",
+            filter_chain,
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            os.getenv("FFMPEG_PRESET", "medium"),
+            "-crf",
+            os.getenv("FFMPEG_CRF", "22"),
+            "-pix_fmt",
+            "yuv420p",
+            str(output_path),
+        ]
+        _run_command(cmd, cwd=output_path.parent)
+        return str(source_path)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(source_path),
+        "-t",
+        _ffmpeg_timestamp(duration_seconds),
+        "-vf",
+        filter_chain,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        os.getenv("FFMPEG_PRESET", "medium"),
+        "-crf",
+        os.getenv("FFMPEG_CRF", "22"),
+        "-pix_fmt",
+        "yuv420p",
+        str(output_path),
+    ]
+    _run_command(cmd, cwd=output_path.parent)
+    return str(source_path)
+
+
+def _attempt_ffmpeg_run(
+    *,
+    job_dir: Path,
+    manifest: dict[str, Any],
+    width: int,
+    height: int,
+    fps: int,
+) -> dict[str, Any]:
+    if shutil.which("ffmpeg") is None:
+        return {"status": "skipped", "reason": "ffmpeg_binary_not_found"}
+
+    scenes = manifest.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        return {"status": "skipped", "reason": "ffmpeg_manifest_has_no_scenes"}
+
+    scene_renders_dir = job_dir / "renders" / "scenes"
+    scene_renders_dir.mkdir(parents=True, exist_ok=True)
+    intermediate_raw = job_dir / "renders" / "intermediate_raw.mp4"
+    concat_list_path = job_dir / "renders" / "scene_concat.txt"
+
+    segment_paths: list[Path] = []
+    scene_attempts: list[dict[str, Any]] = []
+    transitions: list[dict[str, Any]] = []
+
+    for index, row in enumerate(scenes, start=1):
+        if not isinstance(row, dict):
+            continue
+
+        scene_id = str(row.get("scene_id", f"scene-{index:03d}"))
+        start_frame = int(row.get("start_frame", 0))
+        end_frame = int(row.get("end_frame", start_frame + 1))
+        duration = max(1, end_frame - start_frame)
+
+        source_path = Path(str(row.get("image_path", "")))
+        if source_path.exists() and source_path.suffix.lower() in (SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS):
+            normalized_source: Path | None = source_path
+        else:
+            normalized_source = None
+
+        duration_seconds = duration / float(fps)
+        segment_path = scene_renders_dir / f"scene_{index:03d}.mp4"
+        segment_reference = _run_ffmpeg_scene_render(
+            source_path=normalized_source,
+            output_path=segment_path,
+            duration_seconds=duration_seconds,
+            width=width,
+            height=height,
+            fps=fps,
+        )
+        segment_paths.append(segment_path)
+
+        if index > 1:
+            previous_duration_frames = int(scene_attempts[-1]["duration_frames"])
+            mix_frames = _transition_mix_frames(
+                str(scene_attempts[-1].get("transition_hint", "")),
+                fps=fps,
+                left_frames=previous_duration_frames,
+                right_frames=duration,
+            )
+            transition_hint = str(scene_attempts[-1].get("transition_hint", ""))
+            transitions.append(
+                {
+                    "from_scene": scene_attempts[-1]["scene_id"],
+                    "to_scene": scene_id,
+                    "hint": transition_hint,
+                    "xfade": _transition_to_xfade(transition_hint),
+                    "duration_frames": mix_frames,
+                }
+            )
+
+        scene_attempts.append(
+            {
+                "scene_id": scene_id,
+                "attempts": 1,
+                "segment": str(segment_path),
+                "segment_source": segment_reference,
+                "duration_frames": duration,
+                "duration_seconds": round(duration_seconds, 3),
+                "transition_hint": str(row.get("transition_type", "")).strip(),
+            }
+        )
+
+    if not segment_paths:
+        return {"status": "skipped", "reason": "ffmpeg_no_renderable_scenes"}
+
+    has_transitions = any(int(t.get("duration_frames", 0)) > 0 for t in transitions)
+    concat_mode = "copy"
+    concat_list_value = ""
+
+    if has_transitions:
+        compose_cmd: list[str] = ["ffmpeg", "-y"]
+        for segment_path in segment_paths:
+            compose_cmd.extend(["-i", str(segment_path)])
+
+        graph_parts: list[str] = []
+        for index in range(len(segment_paths)):
+            graph_parts.append(f"[{index}:v]settb=AVTB,format=yuv420p[v{index}]")
+
+        current_label = "v0"
+        current_duration = float(scene_attempts[0]["duration_seconds"])
+
+        for index in range(1, len(segment_paths)):
+            transition_row = transitions[index - 1]
+            transition_seconds = int(transition_row.get("duration_frames", 0)) / float(fps)
+            next_duration = float(scene_attempts[index]["duration_seconds"])
+            out_label = f"vx{index}"
+
+            if transition_seconds <= 0:
+                graph_parts.append(f"[{current_label}][v{index}]concat=n=2:v=1:a=0[{out_label}]")
+                current_duration += next_duration
+            else:
+                offset = max(0.0, current_duration - transition_seconds)
+                graph_parts.append(
+                    (
+                        f"[{current_label}][v{index}]xfade="
+                        f"transition={transition_row.get('xfade', 'fade')}:"
+                        f"duration={_ffmpeg_timestamp(transition_seconds)}:"
+                        f"offset={_ffmpeg_timestamp(offset)}"
+                        f"[{out_label}]"
+                    )
+                )
+                current_duration += next_duration - transition_seconds
+
+            current_label = out_label
+
+        compose_cmd.extend(
+            [
+                "-filter_complex",
+                ";".join(graph_parts),
+                "-map",
+                f"[{current_label}]",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                os.getenv("FFMPEG_PRESET", "medium"),
+                "-crf",
+                os.getenv("FFMPEG_CRF", "22"),
+                "-pix_fmt",
+                "yuv420p",
+                str(intermediate_raw),
+            ]
+        )
+        _run_command(compose_cmd, cwd=job_dir)
+        concat_mode = "xfade"
+    else:
+        concat_file_payload = "\n".join(f"file '{path.resolve().as_posix()}'" for path in segment_paths)
+        concat_list_path.write_text(f"{concat_file_payload}\n", encoding="utf-8")
+        concat_list_value = str(concat_list_path)
+
+        concat_copy_cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_list_path),
+            "-c",
+            "copy",
+            str(intermediate_raw),
+        ]
+        try:
+            _run_command(concat_copy_cmd, cwd=job_dir)
+            concat_mode = "copy"
+        except RenderPipelineError:
+            concat_reencode_cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_list_path),
+                "-c:v",
+                "libx264",
+                "-preset",
+                os.getenv("FFMPEG_PRESET", "medium"),
+                "-crf",
+                os.getenv("FFMPEG_CRF", "22"),
+                "-pix_fmt",
+                "yuv420p",
+                str(intermediate_raw),
+            ]
+            _run_command(concat_reencode_cmd, cwd=job_dir)
+            concat_mode = "reencode"
+
+    if not intermediate_raw.exists():
+        return {"status": "skipped", "reason": "ffmpeg_output_not_produced"}
+
+    return {
+        "status": "completed",
+        "output": str(intermediate_raw),
+        "segments": [str(path) for path in segment_paths],
+        "concat_list": concat_list_value,
+        "concat_mode": concat_mode,
+        "transitions": transitions,
+        "fps": fps,
+        "resolution": f"{width}x{height}",
+        "scene_attempts": scene_attempts,
+    }
+
+
+def _add_voiceover_and_optional_music(
+    *,
+    job_dir: Path,
+    input_video: Path,
+    voiceover_path: Path,
+) -> Path:
+    output_path = job_dir / "renders" / "intermediate_with_audio.mp4"
+    music_bed = job_dir / "audio" / "music_bed.wav"
+
+    if not voiceover_path.exists():
+        shutil.copyfile(input_video, output_path)
+        return output_path
+
+    if music_bed.exists():
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_video),
+            "-i",
+            str(voiceover_path),
+            "-i",
+            str(music_bed),
+            "-filter_complex",
+            (
+                "[2:a]volume=0.22[music];"
+                "[music][1:a]sidechaincompress=threshold=0.08:ratio=10:attack=15:release=300[ducked];"
+                "[1:a][ducked]amix=inputs=2:weights='1 0.55':normalize=0[aout]"
+            ),
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(output_path),
+        ]
+    else:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_video),
+            "-i",
+            str(voiceover_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(output_path),
+        ]
+
+    _run_command(cmd, cwd=job_dir)
+    return output_path
+
+
+def build_render_stage(job_id: str, cfg: PipelineConfig, *, job_dir: Path, logger=None) -> dict[str, Any]:
+    job_dir = job_dir.resolve()
+    width, height = _aspect_to_dimensions(cfg.aspect_ratio)
+    fps = int(os.getenv("RENDER_FPS", "30"))
+    report_path = job_dir / "renders" / "render_report.json"
+
+    try:
+        scenes = _load_scenes(job_dir)
+        assets_by_scene = _load_assets_by_scene(job_dir)
+        manifest = _build_scene_manifest(
+            job_id,
+            scenes,
+            assets_by_scene,
+            job_dir=job_dir,
+            fps=fps,
+        )
+
+        manifest_path = job_dir / "renders" / "scene_manifest.json"
+        _write_json(manifest_path, manifest)
+
+        requested_engine = os.getenv("RENDER_ENGINE", "auto").strip().lower() or "auto"
+        if requested_engine not in {"auto", "ffmpeg"}:
+            raise ValidationPipelineError(
+                f"Unsupported RENDER_ENGINE='{requested_engine}'. This pipeline now supports FFmpeg only."
+            )
+
+        ffmpeg_result = _attempt_ffmpeg_run(
+            job_dir=job_dir,
+            manifest=manifest,
+            width=width,
+            height=height,
+            fps=fps,
+        )
+        if ffmpeg_result.get("status") != "completed":
+            reason = str(ffmpeg_result.get("reason", "ffmpeg_render_failed"))
+            raise RenderPipelineError(f"FFmpeg render failed: {reason}")
+
+        intermediate_raw = job_dir / "renders" / "intermediate_raw.mp4"
+        scene_attempts = list(ffmpeg_result.get("scene_attempts", []))
+
+        voiceover_path = job_dir / "audio" / "voiceover.wav"
+        intermediate_with_audio = _add_voiceover_and_optional_music(
+            job_dir=job_dir,
+            input_video=intermediate_raw,
+            voiceover_path=voiceover_path,
+        )
+
+        payload = {
+            "job_id": job_id,
+            "status": "rendered",
+            "engine": "ffmpeg",
+            "scene_manifest": str(manifest_path.relative_to(job_dir)),
+            "intermediate_raw": str(intermediate_raw.relative_to(job_dir)),
+            "intermediate_with_audio": str(intermediate_with_audio.relative_to(job_dir)),
+            "ffmpeg": ffmpeg_result,
+            "scene_attempts": scene_attempts,
+            "fps": fps,
+            "resolution": f"{width}x{height}",
+            "warnings": manifest.get("warnings", []),
+        }
+
+        if logger:
+            logger.emit(
+                "info",
+                "render_stage_outputs",
+                manifest=payload["scene_manifest"],
+                intermediate=payload["intermediate_with_audio"],
+            )
+        return payload
+    except Exception as exc:
+        _write_json(
+            report_path,
+            {
+                "job_id": job_id,
+                "status": "failed",
+                "settings": {
+                    "aspect_ratio": cfg.aspect_ratio,
+                    "fps": fps,
+                    "resolution": f"{width}x{height}",
+                },
+                "warnings": [],
+                "failures": [str(exc)],
+            },
+        )
+        if logger:
+            logger.emit("error", "render_stage_failed", error=str(exc))
+        raise

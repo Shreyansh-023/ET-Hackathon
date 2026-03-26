@@ -1,0 +1,22 @@
+[project]
+name = "news2video"
+version = "0.1.0"
+description = "Schema-first news-to-video pipeline baseline"
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2.6,<3.0",
+  "jsonschema>=4.21,<5.0",
+  "typer>=0.12,<1.0",
+  "rich>=13.7,<14.0",
+  "python-dotenv>=1.0,<2.0",
+  "requests>=2.32,<3.0",
+  "google-genai>=1.30,<2.0",
+  "openai>=2.29,<3.0",
+  "groq>=0.19,<1.0",
+  "nvidia-riva-client>=2.17,<3.0",
+  "soundfile>=0.13,<1.0",
+  "openai-whisper>=20240930",
+]
+
+[project.scripts]
+news2video = "src.cli:main"

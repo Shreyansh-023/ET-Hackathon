@@ -1,0 +1,1168 @@
+# PRD: LLM-Powered News Article to 90-Second Video Generator
+
+## 1. Product Summary
+
+### Product Name
+
+News-to-Video Generator (working title)
+
+### One-line Description
+
+A CLI-first, LLM-orchestrated system that converts a news article into a polished 90-second vertical or horizontal video using a structured storyboard pipeline, stock imagery, AI-generated images, voiceover, subtitles, motion graphics, and Blender-based rendering.
+
+### Problem Statement
+
+Creators, publishers, and social media teams spend significant time converting written news into short-form video. Manual production requires scripting, asset search, editing, timing, narration, and rendering. Existing tools are either too manual, too rigid, or too focused on generic AI video generation without editorial control. The product should automate the pipeline while still allowing strong narrative control and deterministic output.
+
+### Product Vision
+
+Transform a news article into a broadcast-quality short video with minimal human input by using an LLM as the planning layer and Blender as the rendering/compositing engine, with stock images and Stable Diffusion as asset sources.
+
+### Target Output
+
+* 90-second video
+* Vertical 9:16 as default, with optional 16:9 export
+* Voiceover
+* On-screen captions
+* Scene-based visuals
+* Intro and outro branding
+* Optional lower-thirds and headline cards
+
+---
+
+## 2. Goals and Non-Goals
+
+### Goals
+
+1. Convert a single news article into a coherent 90-second video.
+2. Use an LLM to parse the article, generate a storyboard, and select visual strategy per scene.
+3. Support a hybrid visual pipeline using:
+
+   * stock images for real-world events and factual scenes
+   * Stable Diffusion for abstract, symbolic, or missing visuals
+   * Blender for compositing, motion graphics, and final rendering
+4. Produce output that is repeatable, configurable, and auditable.
+5. Enable a CLI-based or backend API-based workflow.
+6. Allow template-driven editing rather than free-form prompt-to-video chaos.
+
+### Non-Goals (MVP)
+
+1. Real-time live editing.
+2. Full non-linear editor timeline comparable to Premiere Pro.
+3. User-authored hand-drawn keyframe animation.
+4. Human-level editorial judgment without any structured constraints.
+5. Long-form documentaries or multi-minute explainers.
+6. Fully autonomous factual verification from the web in MVP.
+
+---
+
+## 3. Primary Use Cases
+
+### Use Case A: News Publisher Social Clip
+
+A newsroom provides a recent article and wants a 90-second summary video for YouTube Shorts, Instagram Reels, or X video.
+
+### Use Case B: Creator Workflow
+
+A solo creator pastes an article into a CLI tool and receives a narrated summary video with supporting visuals.
+
+### Use Case C: Agency Batch Production
+
+A team processes multiple news articles per day with consistent branding templates.
+
+### Use Case D: Multi-language Publishing
+
+The same article is rendered into different languages with localized voiceover and captions.
+
+---
+
+## 4. Success Metrics
+
+### Product Metrics
+
+* Time from article input to final rendered video.
+* Percentage of videos completed without manual intervention.
+* Storyboard acceptance rate.
+* Asset retrieval success rate.
+* Render success rate.
+* Average user edits required per video.
+
+### Quality Metrics
+
+* Factual consistency score.
+* Narration-to-visual alignment score.
+* Caption alignment accuracy.
+* Scene timing correctness.
+* Visual relevance rating.
+
+### Operational Metrics
+
+* Average generation cost per video.
+* Render time per minute of output.
+* CPU/GPU utilization.
+* Failure rate by stage.
+
+---
+
+## 5. Users and Personas
+
+### Persona 1: Newsroom Producer
+
+Needs fast, clean, branded videos from articles with minimal editing.
+
+### Persona 2: Solo Creator
+
+Needs low-effort video generation for commentary or summarization.
+
+### Persona 3: Operations Lead
+
+Needs batch processing, logs, retries, and consistent templates.
+
+### Persona 4: Product Engineer
+
+Needs a modular architecture, clear schemas, and predictable outputs.
+
+---
+
+## 6. User Experience Overview
+
+### CLI Experience
+
+User runs a command such as:
+
+```bash
+news2video --input article.txt --style breaking-news --aspect 9:16 --duration 90 --output out.mp4
+```
+
+### Expected UX Flow
+
+1. User provides article or URL/text.
+2. System extracts and normalizes article content.
+3. LLM produces structured story plan.
+4. Asset planner decides for each scene:
+
+   * stock image
+   * Stable Diffusion image
+   * text-only motion graphic
+   * quote card
+   * chart/infographic
+5. Voiceover script and subtitles are generated.
+6. Assets are fetched or generated.
+7. Blender composes scenes into a timeline.
+8. Final render is produced and optionally post-processed by FFmpeg.
+9. User receives video and a manifest file.
+
+---
+
+## 7. End-to-End Pipeline
+
+### Stage 0: Ingestion
+
+**Input types**
+
+* Raw article text
+* HTML page
+* URL
+* Markdown file
+* RSS item
+* Document file
+
+**Responsibilities**
+
+* Clean HTML
+* Remove boilerplate
+* Detect language
+* Normalize punctuation and whitespace
+* Store canonical article text
+
+**Outputs**
+
+* clean_article_text
+* article_metadata
+* source_url
+* publish_date if available
+* language
+
+---
+
+### Stage 1: Article Understanding
+
+The LLM or preprocessing layer extracts:
+
+* headline
+* subhead
+* article summary
+* key entities
+* events
+* sentiment/tone
+* topic category
+* time sensitivity
+* visualizable concepts
+* quotes suitable for on-screen text
+* factual highlights
+
+**Output format** should be structured JSON, not free text.
+
+Example output:
+
+```json
+{
+  "headline": "...",
+  "summary": "...",
+  "tone": "serious",
+  "topic": "politics",
+  "key_points": [
+    {"text": "...", "importance": 0.95},
+    {"text": "...", "importance": 0.80}
+  ],
+  "entities": [
+    {"name": "...", "type": "person"}
+  ],
+  "visual_hooks": ["crowd", "city skyline", "press conference"]
+}
+```
+
+---
+
+### Stage 2: Storyboard Generation
+
+The LLM converts the article into a scene plan.
+
+**Storyboard constraints**
+
+* Total duration fixed at 90 seconds.
+* Scenes should have explicit start/end timestamps.
+* Each scene must have a purpose.
+* Each scene must define narration text, on-screen text, and visual plan.
+* The storyboard should allocate time proportionally to importance.
+
+**Recommended scene model**
+
+* Scene 1: Hook / opening headline
+* Scene 2–N: Main facts and context
+* Scene N-1: Summary / implications
+* Scene N: Outro / call to action / brand close
+
+**Storyboard schema example**
+
+```json
+{
+  "duration_seconds": 90,
+  "scenes": [
+    {
+      "id": "scene_01",
+      "start": 0,
+      "end": 8,
+      "type": "hook",
+      "narration": "...",
+      "on_screen_text": "Breaking News",
+      "visual_strategy": "stock_image",
+      "visual_prompt": "...",
+      "motion": ["fade_in", "slow_zoom"],
+      "audio_cue": "intro_hit"
+    }
+  ]
+}
+```
+
+---
+
+### Stage 3: Visual Strategy Selection
+
+Each scene should be assigned one visual strategy.
+
+#### Strategy A: Stock Images
+
+Use when the article refers to real-world places, public figures, institutions, events, or generally searchable concepts.
+
+**Best for**
+
+* cities
+* buildings
+* meetings
+* maps
+* public protests
+* generic business settings
+* natural disasters when plausible footage is unavailable
+
+**Pros**
+
+* realistic
+* fast to source
+* usually lower hallucination risk than AI-generated visuals
+
+**Cons**
+
+* may not match the exact event
+* licensing must be managed carefully
+* image search can fail on niche topics
+
+#### Strategy B: Stable Diffusion Images
+
+Use when the article contains abstract, symbolic, or hard-to-source visuals.
+
+**Best for**
+
+* dramatic concept shots
+* symbolic representations
+* futuristic visuals
+* generic scenes missing available stock
+* stylized editorial motion backgrounds
+
+**Pros**
+
+* flexible prompt control
+* consistent visual style when seeded correctly
+* local or self-hosted deployment possible
+
+**Cons**
+
+* factual accuracy risk if used for real-world people/events
+* occasional visual artifacts
+* style drift across multiple generations
+
+#### Strategy C: Blender Motion Graphics
+
+Use for
+
+* headlines
+* transitions
+* lower thirds
+* animated text
+* charts
+* map callouts
+* layered compositing
+* animated overlays
+
+**Pros**
+
+* deterministic and precise
+* excellent for motion graphics
+* supports timelines and keyframes
+
+**Cons**
+
+* more engineering overhead
+* requires scene templates
+* not ideal as a standalone image source
+
+#### Hybrid Rule
+
+The system should combine all three based on scene type, not treat them as competing replacements.
+
+---
+
+### Stage 4: Script Generation
+
+The script generation layer produces:
+
+* narration text
+* subtitle text
+* on-screen callouts
+* scene transitions
+* image prompts
+* Blender template selection
+
+**Important principle**
+The LLM should not be allowed to output arbitrary Blender code in the main production path. It should output structured scene specs that map to prebuilt templates.
+
+---
+
+### Stage 5: Asset Acquisition and Generation
+
+#### 5.1 Stock Image Retrieval
+
+The system should query one or more stock sources.
+
+**Selection logic**
+
+* Use keywords and entities from the article.
+* Prefer editorial or contextual images.
+* Score candidates by relevance, clarity, aspect ratio, and license suitability.
+
+**Fallbacks**
+
+* If no suitable image exists, use AI-generated image.
+* If neither exists, use motion graphic or text-based scene.
+
+#### 5.2 Stable Diffusion Generation
+
+The system should create a prompt from the scene spec.
+
+**Prompt template inputs**
+
+* scene topic
+* tone
+* color palette
+* aspect ratio
+* visual style
+* negative prompt
+* branding rules
+
+**Prompt output example**
+
+```text
+A dramatic editorial illustration of a financial district during market turmoil, red downward arrows, cinematic lighting, modern news graphics style, high contrast, 9:16 composition
+```
+
+**Generation controls**
+
+* seed management for consistency
+* number of samples
+* resolution presets
+* negative prompts
+* style presets per brand
+
+#### 5.3 Asset Storage
+
+All assets should be stored in a local cache and asset registry.
+
+**Each asset record should include**
+
+* asset_id
+* source type
+* source path or URL
+* license or usage metadata
+* prompt used for generation
+* seed used
+* generation timestamp
+* scene_id linkage
+* status
+
+---
+
+### Stage 6: Voiceover Generation
+
+The system should generate a narration script and convert it into speech.
+
+**Voiceover requirements**
+
+* clear articulation
+* neutral news tone by default
+* support for multiple voices and languages
+* sentence-level timing metadata if possible
+
+**Important**
+Voiceover should be generated before final compositing so that scene timing can align with spoken duration.
+
+---
+
+### Stage 7: Subtitle Generation
+
+Subtitles should be derived from the narration script or from forced alignment.
+
+**Subtitle responsibilities**
+
+* word or sentence timing
+* safe line wrapping
+* readability on mobile devices
+* accurate punctuation and casing
+
+**Optional subtitle styles**
+
+* broadcast style
+* minimalist style
+* punchy social style
+
+---
+
+### Stage 8: Blender Composition Layer
+
+Blender is the render/compositing engine.
+
+#### Responsibilities
+
+* create scene templates
+* load images and generated assets
+* animate camera moves
+* animate text and overlays
+* compose clips into one timeline
+* render final output
+
+#### Recommended Blender usage model
+
+Use a Python automation layer to generate and render scenes.
+
+**Preferred approach**
+
+* Maintain reusable template scenes in Blender.
+* Generate a scene manifest JSON.
+* Use a Python script to instantiate scenes, keyframes, image planes, text objects, audio tracks, and transitions.
+
+#### Why Blender is useful here
+
+* deterministic animation
+* strong timeline control
+* supports high-quality motion graphics
+* works in headless mode
+* can produce consistent brand templates
+
+---
+
+### Stage 9: Final Rendering and Post-Processing
+
+After Blender renders the video, use a post-processing stage.
+
+**Post-processing tasks**
+
+* compress with FFmpeg
+* normalize audio
+* add loudness correction
+* produce multiple aspect ratios if needed
+* create thumbnails
+* optionally burn subtitles or create separate subtitle files
+
+---
+
+## 8. System Architecture
+
+### Recommended Services
+
+1. **API / CLI Frontend**
+2. **Orchestrator**
+3. **LLM Planner**
+4. **Article Parser**
+5. **Storyboard Engine**
+6. **Asset Resolver**
+7. **Stable Diffusion Service**
+8. **Voiceover Service**
+9. **Subtitle Service**
+10. **Blender Renderer**
+11. **Post-Processor**
+12. **Storage / Cache Layer**
+13. **Observability Layer**
+
+### Suggested Data Flow
+
+```text
+Input Article
+  → Parser
+  → LLM Planner
+  → Storyboard JSON
+  → Asset Planner
+  → Asset Fetch/Generate
+  → Voiceover
+  → Subtitle Timing
+  → Blender Scene Build
+  → Render
+  → Post-process
+  → Export
+```
+
+---
+
+## 9. Core Data Models
+
+### Article Model
+
+* id
+* source_url
+* raw_text
+* cleaned_text
+* language
+* publish_date
+* title
+* metadata
+
+### Scene Model
+
+* scene_id
+* order
+* start_time
+* end_time
+* narration
+* on_screen_text
+* visual_strategy
+* asset references
+* transition type
+* template type
+* emphasis level
+
+### Asset Model
+
+* asset_id
+* type
+* source
+* path
+* prompt
+* license status
+* linked scene
+
+### Render Job Model
+
+* job_id
+* article_id
+* status
+* retries
+* render settings
+* output path
+* logs
+* timestamps
+
+---
+
+## 10. Prompt and Schema Design
+
+### Principle
+
+Prompts should be constrained and evaluated against a strict schema.
+
+### LLM Outputs Needed
+
+1. Article summary JSON
+2. Scene storyboard JSON
+3. Visual prompt JSON
+4. Voiceover script JSON
+5. Brand style JSON
+6. Safety/factual risk tags
+
+### Important Constraints
+
+* output must be valid JSON
+* all scenes require timestamps
+* all scene times must sum to approximately 90 seconds
+* every scene must have one visual strategy
+* no unsupported free-form animation instructions
+
+---
+
+## 11. Timing and Scene Allocation Rules
+
+### Timing Policy
+
+* total duration fixed to 90 seconds
+* opening hook: 5–10 seconds
+* body scenes: 60–70 seconds
+* closing recap: 5–10 seconds
+
+### Scene Duration Guidelines
+
+* headline cards: 3–6 seconds
+* quote scenes: 4–8 seconds
+* chart scenes: 6–12 seconds
+* stock image scenes: 5–8 seconds
+* AI image scenes: 5–8 seconds
+
+### Timing Engine Responsibilities
+
+* compute target duration from script length
+* adjust scene lengths to narration pace
+* allow pauses for visual emphasis
+* ensure no scene feels rushed or empty
+
+---
+
+## 12. Visual Design System
+
+### Brand Assets
+
+* logo
+* intro animation
+* outro card
+* font set
+* color palette
+* lower-third template
+* caption style
+
+### Default News Style
+
+* clean sans-serif font
+* high contrast text overlays
+* subtle motion
+* dark or neutral background
+* red accent for breaking news
+* blue accent for general news
+
+### Motion Language
+
+* fade in/out
+* slow zoom
+* pan across still images
+* text slide-in
+* card transitions
+* animated lines and bullets
+
+### Composition Rules
+
+* keep safe margins for mobile cropping
+* avoid too much text per frame
+* prioritize readability over decoration
+* use motion to guide attention, not distract
+
+---
+
+## 13. Stock Image Subsystem Requirements
+
+### Search Pipeline
+
+* generate search keywords from article entities and events
+* generate fallbacks and synonyms
+* search by topic, location, object, and mood
+
+### Ranking Criteria
+
+* relevance to scene
+* visual quality
+* aspect ratio suitability
+* freshness or editorial value
+* license compatibility
+
+### Retrieval Failures
+
+If stock image search fails, the system should automatically switch to:
+
+1. AI image generation
+2. abstract motion background
+3. text-card scene
+
+### Asset Deduplication
+
+Avoid repeating visually similar assets across adjacent scenes unless intentional.
+
+---
+
+## 14. Stable Diffusion Subsystem Requirements
+
+### Model Hosting Options
+
+* local GPU
+* self-hosted server
+* inference microservice
+
+### Minimum Features
+
+* text-to-image generation
+* image-to-image optional
+* negative prompts
+* seed control
+* batch generation
+* style presets
+
+### Prompt Engineering Requirements
+
+Every scene prompt should include:
+
+* subject
+* composition
+* style
+* lighting
+* mood
+* aspect ratio
+* negative constraints
+
+### Quality Control
+
+The system should reject images that:
+
+* are blurry
+* have obvious deformities in human subjects
+* contain unreadable text
+* conflict with the article meaning
+* fail to match aspect ratio expectations
+
+---
+
+## 15. Blender Subsystem Requirements
+
+### Blender Should Handle
+
+* timeline assembly
+* keyframe animation
+* image scaling and cropping
+* overlay placement
+* text animation
+* transitions
+* audio track insertion
+* render settings
+
+### Template Library
+
+Maintain predefined scene templates such as:
+
+* headline card
+* image + text split screen
+* quote scene
+* bullet list scene
+* infographic scene
+* closing card
+
+### Blender Automation Strategy
+
+Use Python scripts to:
+
+* open a base project
+* inject assets and metadata
+* place objects by scene template
+* assign keyframes
+* render frames
+* export final MP4
+
+### Why Templates Matter
+
+Templates keep output stable, reduce hallucination risk, and prevent the LLM from inventing unsupported layouts.
+
+---
+
+## 16. Voiceover and Audio Design
+
+### Audio Layers
+
+* narration
+* background music
+* sound effects
+* transition whooshes or hits
+
+### Audio Rules
+
+* narration must remain intelligible above background music
+* music must duck under voiceover
+* scene transitions may use short audio cues
+* avoid aggressive music for serious news
+
+### Audio QA
+
+* clipping detection
+* volume normalization
+* silence detection
+* text-to-speech timing fit
+
+---
+
+## 17. Error Handling and Fallback Logic
+
+### Common Failures
+
+* article text too short or too long
+* LLM produces invalid JSON
+* stock image API returns nothing
+* Stable Diffusion generation fails
+* voice synthesis error
+* Blender render crash
+* missing font or asset
+
+### Fallback Rules
+
+* regenerate once with adjusted prompt
+* switch to simpler scene template
+* replace missing visual with branded motion background
+* shorten or merge adjacent scenes
+* emit partial job report if final render fails
+
+### Retry Policy
+
+* bounded retries per stage
+* stage-specific backoff
+* idempotent asset generation when possible
+
+---
+
+## 18. Safety, Ethics, and Editorial Integrity
+
+### Editorial Risks
+
+* hallucinated facts
+* misleading visuals
+* incorrect attribution
+* emotionally manipulative editing
+* inappropriate use of AI-generated imagery for real events
+
+### Safety Rules
+
+* preserve factual meaning from source article
+* avoid inventing people or events
+* do not represent AI-generated images as real photos when the source is not real
+* label synthetic visuals internally
+* keep a provenance log
+
+### Sensitive Content
+
+For sensitive news categories such as violence, disasters, politics, or legal matters, require stricter factual checks and more conservative visuals.
+
+---
+
+## 19. Human-in-the-Loop Controls
+
+### Optional Review Points
+
+* after article parsing
+* after storyboard generation
+* after asset selection
+* before final render
+
+### Review Interface Needs
+
+* approve or edit storyboard
+* replace visual assets
+* adjust voiceover script
+* change style preset
+* lock certain scene timings
+
+### Recommendation
+
+For MVP, keep human review optional but available for risky or high-value articles.
+
+---
+
+## 20. Observability and Logging
+
+### Required Logs
+
+* input article metadata
+* LLM prompts and outputs
+* chosen scenes
+* asset search queries
+* generated asset filenames
+* render commands
+* errors and retries
+* output checksum
+
+### Monitoring
+
+* queue depth
+* job failure rate
+* average latency per stage
+* render time
+* asset generation success
+* storage usage
+
+### Traceability
+
+Each video must be reproducible from its manifest, prompts, and assets.
+
+---
+
+## 21. Storage and Caching
+
+### Cache Layers
+
+* parsed article cache
+* LLM response cache
+* stock image cache
+* Stable Diffusion output cache
+* rendered preview cache
+
+### Storage Structure Example
+
+```text
+/jobs/{job_id}/
+  input/
+  parsed/
+  storyboard/
+  assets/
+  audio/
+  blender/
+  renders/
+  logs/
+```
+
+---
+
+## 22. API and CLI Contracts
+
+### CLI Commands
+
+```bash
+news2video ingest <file-or-url>
+news2video plan <job_id>
+news2video assets <job_id>
+news2video render <job_id>
+news2video export <job_id>
+```
+
+### API Endpoints (Optional)
+
+* POST /jobs
+* GET /jobs/{id}
+* POST /jobs/{id}/review
+* POST /jobs/{id}/render
+* GET /jobs/{id}/output
+
+### Job States
+
+* created
+* ingesting
+* planning
+* asset_generation
+* voiceover
+* compositing
+* rendering
+* post_processing
+* complete
+* failed
+
+---
+
+## 23. MVP Scope
+
+### MVP Should Include
+
+* article ingestion from text
+* LLM article summary
+* storyboard generation
+* stock image retrieval
+* Stable Diffusion fallback
+* narration generation
+* subtitle generation
+* Blender scene templates
+* final MP4 export
+
+### MVP Should Exclude
+
+* collaborative editing
+* advanced analytics dashboard
+* live streaming mode
+* multi-scene complex camera choreography
+* automated fact-checking from multiple sources
+
+---
+
+## 24. Phase Roadmap
+
+### Phase 1: Prototype
+
+* text input only
+* fixed 5-scene template
+* one voice
+* basic stock image search
+* one Stable Diffusion pipeline
+* one Blender template
+
+### Phase 2: MVP
+
+* robust storyboard JSON
+* fallback visual strategy
+* captions
+* multiple styles
+* retry logic
+* better timing control
+
+### Phase 3: Production
+
+* user accounts
+* batch processing
+* style packs
+* multilingual support
+* analytics
+* review UI
+
+### Phase 4: Scale
+
+* distributed rendering
+* GPU inference pool
+* template marketplace
+* team workflows
+* partial render reuse
+
+---
+
+## 25. Recommended Technical Stack
+
+### Orchestration
+
+* Python
+
+### LLM Layer
+
+* structured JSON planner
+* schema validation
+* prompt templates
+
+### Visual Generation
+
+* Stable Diffusion service
+* stock image retrieval service
+* Blender automation scripts
+
+### Rendering
+
+* Blender CLI
+* FFmpeg post-processing
+
+### Audio
+
+* TTS engine
+* timing alignment tools
+
+### Storage
+
+* local disk for MVP
+* object storage later
+
+### Queueing
+
+* background job queue for asset generation and render steps
+
+---
+
+## 26. Design Principles
+
+1. Structure first, generation second.
+2. The LLM plans; templates execute.
+3. Use stock images when they are accurate.
+4. Use Stable Diffusion when stock is unavailable or too abstract.
+5. Use Blender for motion, layout, and final polish.
+6. Keep every scene explainable and traceable.
+7. Make failure recoverable.
+8. Prefer deterministic output over creative freedom in the core pipeline.
+
+---
+
+## 27. Detailed Pipeline Summary
+
+```text
+Article Input
+  → Ingestion and Cleaning
+  → Article Understanding
+  → Key Facts Extraction
+  → Storyboard JSON Generation
+  → Scene-to-Asset Planning
+  → Stock Search / Stable Diffusion Prompting
+  → Asset Generation and Selection
+  → Voiceover Script Generation
+  → TTS and Timing Alignment
+  → Subtitle Generation
+  → Blender Template Assembly
+  → Motion Graphics and Compositing
+  → Render
+  → FFmpeg Post-process
+  → Final Video Export
+```
+
+---
+
+## 28. Open Questions
+
+1. Should the system support URL ingestion in MVP?
+2. Should the default output be vertical or horizontal?
+3. Should the voice be cloned, generic, or branded?
+4. Should stock and AI assets be mixed in the same scene?
+5. How strict should factual verification be before publication?
+6. Should user review be mandatory for political/news-sensitive topics?
+7. How many templates should ship in version 1?
+
+---
+
+## 29. Acceptance Criteria for MVP
+
+The MVP is successful if it can:
+
+* accept a news article as input
+* generate a valid storyboard
+* choose between stock image and Stable Diffusion visually per scene
+* create a voiceover and subtitles
+* render a coherent 90-second video in Blender
+* export a playable MP4 without manual editing
+* produce a manifest that explains the pipeline decisions
+
+---
+
+## 30. Final Recommendation
+
+Build the system as a **planner + renderer** architecture:
+
+* The **LLM** is the planner and scene designer.
+* The **asset layer** chooses between stock imagery and Stable Diffusion.
+* **Blender** is the final deterministic scene compositor.
+* **FFmpeg** handles final packaging and compression.
+
+The core product is not just video generation; it is a structured editorial-to-video pipeline with reproducible scene logic, asset provenance, and motion template execution.

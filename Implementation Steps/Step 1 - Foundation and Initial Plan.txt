@@ -1,0 +1,108 @@
+STEP 1: FOUNDATION AND INITIAL PLAN
+
+Goal
+Set up a deterministic, schema-first baseline so later stages can plug in without rework.
+
+How To Do (Implementation)
+1) Create Python environment and install base dependencies (Windows PowerShell)
+- Create venv: python -m venv .venv
+- Activate venv: .\.venv\Scripts\Activate.ps1
+- Upgrade pip: python -m pip install --upgrade pip
+- Install minimal foundation packages: pip install pydantic jsonschema typer rich python-dotenv
+
+2) Ask user for secrets and save them in environment variables (never hardcode keys)
+- Create .env file and keep only placeholders first:
+  - NVIDIA_API_KEY=
+  - PEXELS_API_KEY=
+  - REPLICATE_API_TOKEN=
+  - GROQ_API_KEY=
+  - GROQ_STT_MODEL=whisper-large-v3
+  - NVIDIA_RIVA_API_KEY=
+  - NVIDIA_RIVA_FUNCTION_ID=877104f7-e885-42b9-8de8-f6e4c6303969
+  - NVIDIA_RIVA_URI=grpc.nvcf.nvidia.com:443
+  - NVIDIA_RIVA_VOICE=Magpie-Multilingual.EN-US.Aria
+  - NVIDIA_RIVA_LANGUAGE=en-US
+- Add .env to .gitignore.
+- Load secrets only via environment variables in code.
+
+Important security action
+- If an API key was pasted in chat or committed anywhere, revoke and regenerate it immediately before implementation.
+
+3) Build project skeleton and module boundaries
+- Create folders:
+  - src/ingest
+  - src/planner
+  - src/assets
+  - src/audio
+  - src/renderer
+  - src/postprocess
+  - src/storage
+  - src/observability
+  - src/common
+- Create config module that reads duration, aspect ratio, style preset, cache paths, and provider keys from .env.
+
+4) Define canonical data contracts (required first)
+- Create strict models/schemas for:
+  - Article
+  - Scene
+  - Asset
+  - RenderJob
+  - Manifest
+- Add validation helpers that stop execution immediately when payload is invalid.
+- Add schema_version field now so future chats keep compatibility.
+
+5) Implement CLI and orchestration skeleton
+- Build command router for:
+  - news2video ingest <file-or-url>
+  - news2video plan <job_id>
+  - news2video assets <job_id>
+  - news2video render <job_id>
+  - news2video export <job_id>
+- Add stage transitions and persist job state to disk after each stage.
+
+6) Implement Stage 0 ingestion (text-first)
+- Accept raw text and local text file.
+- Normalize whitespace and punctuation.
+- Detect language with placeholder logic (or save unknown if not detected).
+- Save clean_article_text and article metadata into parsed outputs.
+
+7) Implement storage and reproducibility baseline
+- Create this job structure for every run:
+  /jobs/{job_id}/input
+  /jobs/{job_id}/parsed
+  /jobs/{job_id}/storyboard
+  /jobs/{job_id}/assets
+  /jobs/{job_id}/audio
+  /jobs/{job_id}/blender
+  /jobs/{job_id}/renders
+  /jobs/{job_id}/logs
+- Write structured JSON logs for each stage.
+
+8) Add basic error handling framework
+- Implement retry wrapper with per-stage retry limits.
+- Add typed error categories: validation, provider, render, io.
+
+Deliverables
+- Runnable CLI skeleton.
+- Validated schema package.
+- Ingestion working for text/file.
+- Persisted job directories and logs.
+- Manifest stub generated per job.
+
+Acceptance Criteria
+- Running ingest produces valid Article JSON.
+- CLI creates job directory and stage logs.
+- Schema validator rejects malformed payloads.
+- Job transitions are deterministic and persisted.
+
+Out of Scope for Step 1
+- Real LLM planning.
+- Stock image retrieval.
+- Stable Diffusion generation.
+- TTS/subtitles.
+- Blender scene rendering.
+
+HIGHLIGHT: Improvement Suggestions
+- Add dry-run mode now so future stages can be tested without paid API calls.
+- Lock schema versions from day one (example: 1.0.0) to avoid cross-chat drift.
+- Add one golden article fixture now to compare all later stages consistently.

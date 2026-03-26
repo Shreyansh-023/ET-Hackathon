@@ -1,0 +1,152 @@
+STEP 3: ASSET PIPELINE + VOICEOVER + SUBTITLES
+
+What Was Already Done in Steps 1-2
+- Core architecture, CLI, schemas, storage, and logging are ready.
+- Ingestion pipeline is operational.
+- Structured article understanding and storyboard generation are operational.
+- Scene-level timing and visual strategy assignment are available.
+
+Goal
+Turn storyboard scenes into concrete visual/audio assets with robust fallback logic.
+
+How To Do (Implementation)
+1) Reuse outputs from Steps 1-2
+- Load storyboard scenes from /jobs/{job_id}/storyboard/storyboard.json.
+- For each scene, read visual_strategy and narration.
+
+2) Implement stock image retrieval with Pexels
+- Read PEXELS_API_KEY from environment.
+- Call GET https://api.pexels.com/v1/search with:
+  - query from scene entities + visual hooks
+  - per_page small first (for example 5)
+  - orientation portrait for 9:16 by default
+- Rank candidates by relevance to scene keywords, image clarity, and orientation fit.
+- Save selected image and metadata in assets registry.
+
+3) Implement Stable Diffusion fallback with Replicate
+- If stock returns low quality or empty, call Replicate with REPLICATE_API_TOKEN.
+- Model path from your input: black-forest-labs/flux-1.1-pro.
+- Build prompt from scene topic, tone, style preset, and aspect ratio.
+- Save prompt, seed if available, model name, generation time, and output path.
+
+4) Implement asset resolver orchestration
+- Resolve per scene in this order:
+  stock -> replicate image -> branded placeholder.
+- Add simple adjacent dedup check using filename hash or embedding similarity threshold.
+
+5) Implement voiceover generation (NVIDIA TTS)
+- Use NVIDIA Riva TTS (Magpie model) over gRPC.
+- Install client dependency: pip install -U nvidia-riva-client soundfile
+- Read these values from environment variables:
+  - NVIDIA_RIVA_API_KEY
+  - NVIDIA_RIVA_FUNCTION_ID
+  - NVIDIA_RIVA_URI (grpc.nvcf.nvidia.com:443)
+  - NVIDIA_RIVA_VOICE (Magpie-Multilingual.EN-US.Aria)
+  - NVIDIA_RIVA_LANGUAGE (en-US)
+- Build auth metadata with function-id and bearer token.
+- Split script by sentence and synthesize sentence clips to improve timing control.
+- Merge sentence clips into one voiceover file while preserving sentence timing map.
+- Store voice profile, language, function id, and generation metadata in audio manifest.
+
+5.1) Quick verification command (before coding integration)
+- Optional smoke test with NVIDIA client script:
+  - pip install -U nvidia-riva-client
+  - git clone https://github.com/nvidia-riva/python-clients.git
+  - run scripts/tts/talk.py against grpc.nvcf.nvidia.com:443 with ssl, function-id metadata, authorization metadata, selected voice, and output path audio.wav
+- If this smoke test fails, stop and fix auth/network issues before integrating in pipeline code.
+
+5.2) In-app Python integration path
+- Use riva.client.Auth(uri, use_ssl=True, metadata=[("function-id", ...), ("authorization", "Bearer ...")]).
+- Use riva.client.SpeechSynthesisService(auth).synthesize(...).
+- Save waveform to wav using soundfile.
+- Return generated file path to downstream subtitle stage.
+
+6) Implement subtitles with Whisper forced alignment
+- Caption content source: always use the same narration text used for TTS.
+- Timing source: use Groq Speech-to-Text with model whisper-large-v3 on final narration audio.
+- Install Groq SDK in project venv: pip install groq
+- Read these values from environment variables:
+  - GROQ_API_KEY
+  - GROQ_STT_MODEL (whisper-large-v3)
+- Use endpoint-compatible call with:
+  - response_format = verbose_json
+  - timestamp_granularities = ["word", "segment"]
+  - language = en (or scene language when multilingual is enabled)
+- Alignment flow:
+  - send final voiceover audio file to transcription endpoint
+  - map returned segments/words to caption lines
+  - keep caption text equal to narration script wording wherever possible
+  - if timing quality is poor for any segment, fallback to sentence duration estimate from TTS clip timings
+- Operational limits to enforce:
+  - file size limit by Groq plan tier
+  - if audio is too large, preprocess or chunk before transcription
+- Preprocess recommendation for large files:
+  - ffmpeg -i input.wav -ar 16000 -ac 1 -map 0:a -c:a flac output.flac
+- Export both subtitles.srt and subtitles.vtt with readable line wrapping.
+
+7) Save required outputs
+- assets_registry.json
+- voiceover.wav (or mp3)
+- subtitles.srt
+- subtitles.vtt
+
+8) Failure and retry logic
+- For Pexels and Replicate calls, retry with backoff on transient HTTP failures.
+- If all providers fail, create text-motion fallback asset entry and continue pipeline.
+
+9) Security and implementation note
+- Keep all keys out of code and logs.
+- In logs, only print masked key prefixes and request ids.
+- If a key is exposed in chat, terminal output, or repository history, rotate it immediately and continue only with the new key.
+
+What This Step Implements
+1. Stock image subsystem
+- Build keyword queries from entities + scene hooks.
+- Retrieve candidates from configured stock provider(s).
+- Rank by relevance, quality, aspect ratio, and license suitability.
+- Save selected asset metadata in asset registry.
+
+2. Stable Diffusion fallback subsystem
+- For scenes with missing/weak stock results, generate AI images.
+- Build prompt template using scene topic, tone, style preset, and aspect ratio.
+- Store seed, prompt, model settings, and output path.
+
+3. Asset resolver orchestration
+- Per scene choose final visual in this order:
+  stock -> SD fallback -> branded motion background placeholder.
+- Prevent adjacent near-duplicate assets where possible.
+
+4. Voiceover generation
+- Convert full narration script to TTS audio.
+- Save sentence-level timing if provider supports it.
+- Store voice profile and language metadata.
+
+5. Subtitle generation
+- Generate subtitle file (SRT/VTT) from narration and timing.
+- Apply line wrapping and readability rules for mobile.
+
+6. Asset and audio outputs
+- Save:
+  - assets_registry.json
+  - voiceover.wav (or mp3)
+  - subtitles.srt
+  - subtitles.vtt
+
+Deliverables
+- assets command produces complete asset registry with fallback outcomes.
+- voiceover and subtitle artifacts are generated and linked to scenes.
+
+Acceptance Criteria
+- Every scene has a resolved visual asset or placeholder fallback.
+- Voiceover file is generated and duration is measurable.
+- Subtitles have non-overlapping timestamps and readable line lengths.
+- All generated/fetched assets include provenance metadata.
+
+Out of Scope for Step 3
+- Final Blender timeline composition
+- Final MP4 rendering and FFmpeg packaging
+
+HIGHLIGHT: Improvement Suggestions
+- Add a lightweight image quality gate (blur/text artifact/human deformity checks) before accepting SD outputs.
+- Implement provider abstraction interfaces now to avoid lock-in to one stock or TTS vendor.
+- Add profanity and sensitive-content speech filters for safer multi-language rollout.

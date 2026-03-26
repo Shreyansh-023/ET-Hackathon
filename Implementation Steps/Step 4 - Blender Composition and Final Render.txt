@@ -1,0 +1,118 @@
+STEP 4: BLENDER COMPOSITION AND FINAL RENDER
+
+What Was Already Done in Steps 1-3
+- End-to-end planning data model and job orchestration are in place.
+- Storyboard scenes with timing are generated.
+- Visual assets are resolved with fallback logic.
+- Voiceover and subtitles are generated and stored.
+
+Goal
+Assemble all prepared assets into deterministic Blender scenes and render a final playable MP4.
+
+How To Do (Implementation)
+1) Reuse outputs from Steps 1-3
+- Load storyboard.json, assets_registry.json, voiceover audio, and subtitle files from job folder.
+- Validate all required scene assets exist before opening Blender automation.
+
+2) Build Blender template library
+- Prepare reusable template scenes in one base Blender project:
+  - headline card
+  - image plus text split
+  - quote card
+  - bullet scene
+  - outro card
+- Keep template names stable so automation maps scene type deterministically.
+
+3) Create manifest bridge to Blender
+- Build blender_scene_manifest.json from storyboard plus assets.
+- For each scene include:
+  - template_name
+  - start_frame and end_frame
+  - image path
+  - text blocks
+  - transition type
+  - motion parameters
+
+4) Implement Blender Python automation
+- Open base project.
+- For each manifest scene:
+  - instantiate matching template
+  - inject image/text data
+  - set keyframes for entry, hold, and exit
+- Add voiceover track to timeline and align scene boundaries to speech timing.
+
+5) Render pipeline
+- Render primary aspect ratio output first (9:16 default).
+- Configure Blender output to direct video render (FFMPEG/H264 MP4), not PNG frame sequence.
+- Write intermediate video directly to /jobs/{job_id}/renders/blender_raw.mp4.
+- Do not persist per-frame image outputs unless a debug mode is explicitly enabled.
+
+6) FFmpeg post-processing
+- Compress final output.
+- Normalize loudness.
+- Optionally burn subtitles from subtitles.srt.
+- Generate optional preview.mp4 and thumbnail.jpg.
+
+7) Output and reporting
+- Save:
+  - final.mp4
+  - preview.mp4 (optional)
+  - thumbnail.jpg
+  - render_report.json
+- Include render settings, durations, warnings, and failures in report.
+
+8) Failure and retry logic
+- If one scene render fails, retry that scene once before full job retry.
+- If Blender crashes repeatedly, output partial render_report.json and mark job failed with reason.
+
+What This Step Implements
+1. Blender template library
+- Build reusable templates:
+  - headline card
+  - image + text split
+  - quote card
+  - bullet scene
+  - outro card
+- Parameterize templates via scene manifest fields.
+
+2. Scene manifest to Blender bridge
+- Translate storyboard + asset registry into blender_scene_manifest.json.
+- Inject image planes, text layers, transitions, and timing keyframes.
+
+3. Timeline assembly and audio integration
+- Place scene segments on timeline in order.
+- Add voiceover track and optional music bed.
+- Apply basic ducking rules so narration remains clear.
+
+4. Rendering pipeline
+- Render primary aspect ratio output.
+- Run FFmpeg postprocess for:
+  - compression
+  - loudness normalization
+  - optional subtitle burn-in
+
+5. Export outputs
+- final.mp4
+- preview.mp4 (optional low bitrate)
+- thumbnail.jpg
+- render_report.json
+
+Deliverables
+- render command that produces a coherent 90-second video.
+- Deterministic template-based compositing without free-form LLM animation code.
+
+Acceptance Criteria
+- Final MP4 is playable and near 90 seconds.
+- Scene order and timing match storyboard within tolerance.
+- Captions align with narration timing.
+- Render report includes settings, durations, and errors/warnings.
+
+Out of Scope for Step 4
+- Human review UI
+- Batch queue scaling and distributed GPU scheduling
+
+HIGHLIGHT: Improvement Suggestions
+- Keep a fixed camera/motion profile per template family for stronger visual consistency.
+- Add automatic safe-zone checks to avoid text clipping in 9:16 mobile crops.
+- Generate both 9:16 and 16:9 from one timeline by using layout presets instead of duplicated scene logic.
+- Add optional DEBUG_RENDER_MODE=frames to allow troubleshooting only when needed, while default remains direct MP4.

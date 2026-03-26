@@ -1,0 +1,131 @@
+STEP 2: LLM PLANNING AND STORYBOARD ENGINE
+
+What Was Already Done in Step 1
+- Project/module skeleton exists.
+- CLI command routing exists.
+- Canonical schemas and validation are in place.
+- Ingestion pipeline produces clean article input.
+- Job storage, logging, and stage transitions are available.
+
+Goal
+Implement structured article understanding and a deterministic 90-second storyboard planner.
+
+How To Do (Implementation)
+1) Reuse Step 1 artifacts
+- Read cleaned article from /jobs/{job_id}/parsed.
+- Load config and provider keys from environment variables.
+
+2) Connect NVIDIA LLM planning API using requests
+- Endpoint: https://integrate.api.nvidia.com/v1/chat/completions
+- Use Authorization header with NVIDIA_API_KEY from environment.
+- Keep stream=true support for debugging raw output.
+- Use model moonshotai/kimi-k2.5 as provided.
+
+3) Build two strict prompts (no free text output allowed)
+- Prompt A: article understanding JSON.
+- Prompt B: storyboard JSON with scene timestamps.
+- In both prompts, require valid JSON only and include target schema fields explicitly.
+
+4) Implement article understanding stage
+- Input: cleaned article text.
+- Output fields:
+  - headline
+  - summary
+  - key_points with importance
+  - entities
+  - visual_hooks
+  - tone and topic
+- Validate JSON against schema; if invalid, run one repair prompt and validate again.
+
+5) Implement storyboard generation stage
+- Generate scenes with required fields:
+  - id, start, end, type
+  - narration
+  - on_screen_text
+  - visual_strategy
+  - visual_prompt seed text
+  - transition/motion hints
+- Validate structure and semantic checks (start < end, monotonic timeline, no missing required fields).
+
+6) Implement timing allocator and rebalance
+- Enforce policy:
+  - hook: 5-10 sec
+  - body: 60-70 sec
+  - closing: 5-10 sec
+- If total is not near 90 sec, proportionally rebalance body scenes first.
+
+7) Implement fallback planner if LLM output keeps failing
+- After bounded retries, use deterministic template planner that still emits schema-valid scenes.
+
+8) Save traceability artifacts for reproducibility
+- Save:
+  - article_understanding.json
+  - storyboard.json
+  - planner_prompt.txt
+  - planner_output_raw.txt
+
+9) Security and implementation note
+- Do not keep plain API keys in source files.
+- Read .env in runtime and use placeholders in all docs and examples.
+
+What This Step Implements
+1. Article understanding layer
+- Build planner input from Step 1 cleaned article.
+- Generate strict JSON output for:
+  - headline
+  - summary
+  - key_points with importance
+  - entities
+  - visual_hooks
+  - tone/topic
+
+2. Storyboard generation engine
+- Produce scene list with timestamps summing to ~90 seconds.
+- Enforce per-scene fields:
+  - id, start, end, type
+  - narration
+  - on_screen_text
+  - visual_strategy
+  - visual_prompt seed text
+  - transition/motion hints
+
+3. Timing allocator
+- Add rule-based timing policy:
+  - hook: 5-10 sec
+  - body: 60-70 sec
+  - closing: 5-10 sec
+- Rebalance scene durations if total duration is off target.
+
+4. JSON reliability and recovery
+- Add schema guardrails for every LLM output.
+- If invalid JSON:
+  - retry with constrained repair prompt
+  - fallback to deterministic template planner
+
+5. Planning artifacts and traceability
+- Save:
+  - article_understanding.json
+  - storyboard.json
+  - planner_prompt.txt
+  - planner_output_raw.txt
+
+Deliverables
+- Working plan stage producing valid storyboard JSON
+- Automatic repair/fallback for invalid planner output
+- Timing engine that meets 90-second target
+
+Acceptance Criteria
+- plan command generates a valid storyboard with timestamps.
+- Scene times are monotonic and total within tolerance.
+- Every scene has one visual strategy.
+- Planner output is reproducible from stored prompt + article input.
+
+Out of Scope for Step 2
+- Real asset retrieval or generation
+- Voiceover generation
+- Blender rendering
+
+HIGHLIGHT: Improvement Suggestions
+- Add factual-risk tags per scene now (low/medium/high) so later review and QA are easier.
+- Add deterministic seed generation per scene_id for stable downstream visuals.
+- Store one "explain_plan.json" that maps each scene to source key points for editorial auditability.
