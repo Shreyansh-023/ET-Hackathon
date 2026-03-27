@@ -16,7 +16,9 @@
       "Bash(python -m src.cli ingest fixtures/golden_article.txt --title \"Global Economy Shows Resilience Amid Trade and Policy Uncertainty\")",
       "Bash(python -m src.cli plan 20260327-063448-cdced977)",
       "Bash(python -m src.cli plan 20260327-071418-bc6377ef)",
-      "Bash(python -m src.cli assets 20260327-071418-bc6377ef)"
+      "Bash(python -m src.cli assets 20260327-071418-bc6377ef)",
+      "Bash(find /Users/aayushjha/Desktop/ET-Hackathon -maxdepth 2 -name *.txt -type f)",
+      "Bash(python main.py fixtures/golden_article.txt)"
     ]
   }
 }

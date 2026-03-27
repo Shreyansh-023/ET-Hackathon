@@ -230,11 +230,18 @@ def _read_headline(job_dir: Path) -> str:
 
 
 def _escape_drawtext_value(text: str) -> str:
-    """Escape text for use inside ffmpeg drawtext filter value."""
-    text = text.replace("\\", "\\\\\\\\")
+    """Escape text for use inside ffmpeg drawtext filter value.
+
+    Since the command is passed as a list to subprocess (no shell), we only need
+    one level of escaping for ffmpeg's drawtext parser.
+    """
+    text = text.replace("\\", "\\\\")
     text = text.replace("'", "\u2019")
-    text = text.replace(":", "\\\\:")
-    text = text.replace("%", "%%%%")
+    text = text.replace(":", "\\:")
+    text = text.replace(";", "\\;")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+    text = text.replace("%", "%%")
     return text
 
 

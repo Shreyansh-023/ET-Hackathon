@@ -46,7 +46,7 @@ def load_config() -> PipelineConfig:
 
     # Override TTS voice/language based on pipeline language
     if language == "hindi":
-        riva_voice = _env("NVIDIA_RIVA_VOICE", "Long")
+        riva_voice = _env("NVIDIA_RIVA_VOICE", "Magpie-Multilingual.HI-IN.Aria")
         riva_language = _env("NVIDIA_RIVA_LANGUAGE", "hi-IN")
     else:
         riva_voice = _env("NVIDIA_RIVA_VOICE", "Magpie-Multilingual.EN-US.Aria")
