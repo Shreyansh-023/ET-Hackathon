@@ -250,9 +250,27 @@ def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, An
         '  "id": "scene-001",\n'
         '  "visual_type": "photo|graph|chart|map",\n'
         '  "description": "A detailed description of the ideal visual for this scene.",\n'
+        '  "image_source": "pexels|replicate",\n'
         '  "pexels_search_queries": ["query1", "query2", "query3"],\n'
-        '  "replicate_prompt": "Detailed AI image generation prompt (only for graph/chart/map types, empty string for photo)"\n'
+        '  "replicate_prompt": "Detailed AI image generation prompt"\n'
         "}\n\n"
+        "Guidelines for image_source — deciding between pexels (stock photos) and replicate (AI generation):\n"
+        "- Use 'pexels' when the scene depicts something very common, recognizable, or real-world that stock "
+        "photo sites will have good results for. Examples: famous landmarks (Taj Mahal, Eiffel Tower), "
+        "world leaders (Trump, Modi, Putin), country maps/flags, generic cityscapes, offices, stock markets, "
+        "courtrooms, military vehicles, press conferences, parliaments, well-known buildings.\n"
+        "- Use 'replicate' when the scene involves:\n"
+        "  1. Numbers, statistics, growth percentages, data comparisons, economic indicators — these should be "
+        "rendered as infographics/charts/graphs by AI.\n"
+        "  2. Abstract or conceptual visuals that stock photos won't capture well — e.g. 'diplomatic tension', "
+        "'economic uncertainty', 'cyber warfare', 'AI disruption', metaphorical concepts.\n"
+        "  3. Specific composite scenes that don't exist as stock photos — e.g. 'a split image showing two "
+        "countries\\'s flags with a cracked border between them'.\n"
+        "  4. Maps, graphs, charts, infographics, data visualizations.\n"
+        "- IMPORTANT: At least ONE scene in every video MUST use 'replicate'. If all scenes seem best suited "
+        "for pexels, pick the most abstract/conceptual scene and assign it to replicate.\n"
+        "- Always provide BOTH pexels_search_queries AND replicate_prompt for every scene regardless of "
+        "image_source — this allows fallback if the primary source fails.\n\n"
         "Guidelines for pexels_search_queries:\n"
         "- Provide exactly 3 queries per scene.\n"
         "- Be VERY specific and descriptive — generic queries like 'politics' or 'war' return irrelevant results.\n"
@@ -265,10 +283,15 @@ def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, An
         "- Use 'map' ONLY when the narration explicitly references a geographic location that benefits from a map view.\n"
         "- Use 'graph' or 'chart' ONLY when the narration includes specific data, numbers, or statistics.\n\n"
         "Guidelines for replicate_prompt (AI-generated images):\n"
-        "- Only provide a non-empty prompt when visual_type is 'graph', 'chart', or 'map'.\n"
-        "- For maps: describe the exact region, labels, style (e.g. 'Clean satellite-style map of the Persian Gulf showing the Strait of Hormuz highlighted in red, with Iran and Oman labeled, news broadcast style').\n"
-        "- For graphs/charts: describe data, axis labels, colors, chart type, news-graphic style.\n"
-        "- For photos: leave replicate_prompt as an empty string \"\".\n\n"
+        "- ALWAYS provide a detailed prompt for every scene (never leave empty).\n"
+        "- The image will be generated as a 1080x1080 square — compose visuals accordingly.\n"
+        "- IMPORTANT: Since this is for a news agency, always include bold RED and YELLOW accent colors "
+        "in your prompts (red borders, red highlights, yellow data points, red arrows, etc.). "
+        "The overall style should look like a professional TV news broadcast graphic.\n"
+        "- For maps: describe the exact region, labels, style (e.g. 'Clean satellite-style map of the Persian Gulf showing the Strait of Hormuz highlighted in red, with Iran and Oman labeled, red border frame, news broadcast style').\n"
+        "- For graphs/charts/data: describe data points, axis labels, use red and yellow for chart colors, news-graphic style.\n"
+        "- For abstract/conceptual scenes: describe the composition with red/yellow accents, high contrast, news broadcast feel.\n"
+        "- For photo-type scenes: still provide a detailed prompt describing the ideal image as a fallback.\n\n"
         f"Article Title: {article.title or 'Untitled'}\n"
         f"Article Text:\n{article.clean_article_text}\n\n"
         f"Scene Script:\n{scenes_text}"
@@ -318,6 +341,7 @@ def _merge_visual_suggestions(
         row["visual_suggestions"] = {
             "type": visual.get("visual_type", "photo"),
             "description": visual.get("description", "Editorial news visual"),
+            "image_source": visual.get("image_source", "pexels"),
             "pexels_search_queries": visual.get("pexels_search_queries", []),
             "replicate_prompt": visual.get("replicate_prompt", ""),
         }

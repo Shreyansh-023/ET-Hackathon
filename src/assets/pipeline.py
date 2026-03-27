@@ -251,10 +251,19 @@ def _call_replicate(prompt: str, cfg: PipelineConfig) -> dict[str, Any] | None:
         "Authorization": f"Token {cfg.replicate_api_token}",
         "Content-Type": "application/json",
     }
+    # Append news-agency style direction to every prompt
+    news_style_suffix = (
+        " Use bold, vibrant red and yellow accent colors throughout the image. "
+        "Style it as a professional news broadcast graphic with high contrast and clean design."
+    )
+    styled_prompt = prompt.rstrip(". ") + "." + news_style_suffix
+
     payload = {
         "input": {
-            "prompt": prompt,
-            "aspect_ratio": "9:16" if _pick_orientation(cfg.aspect_ratio) == "portrait" else "16:9",
+            "prompt": styled_prompt,
+            "aspect_ratio": "1:1",
+            "width": 1080,
+            "height": 1080,
             "output_format": "png",
             "safety_tolerance": 2,
         }
@@ -351,12 +360,50 @@ def _resolve_scene_asset(
 ) -> tuple[Asset, dict[str, Any], str | None]:
     terms = _query_terms(scene, article_understanding)
     visual_suggestions = scene.visual_suggestions or {}
-    
+
     # Use the first Pexels query, or fall back to generating one
     pexels_queries = visual_suggestions.get("pexels_search_queries", [])
     query = pexels_queries[0] if pexels_queries else (" ".join(terms[:5]) if terms else scene.narration)
     orientation = _pick_orientation(cfg.aspect_ratio)
 
+    # Determine preferred image source from Gemini's suggestion
+    preferred_source = visual_suggestions.get("image_source", "pexels")
+    visual_type = visual_suggestions.get("type", "photo")
+    replicate_prompt = visual_suggestions.get("replicate_prompt", "").strip()
+
+    # --- Try preferred source first, then fallback to the other ---
+
+    if preferred_source == "replicate" and replicate_prompt and not dry_run and cfg.replicate_api_token:
+        # Replicate-preferred: try AI generation first
+        prediction = _call_replicate(replicate_prompt, cfg)
+        if prediction:
+            output_url = _extract_replicate_output_url(prediction)
+            if output_url:
+                image_bytes = _download_bytes(output_url)
+                content_hash = sha256(image_bytes).hexdigest()
+                if not (prev_hash and content_hash == prev_hash):
+                    rel_path = f"assets/generated/{scene.scene_id}.png"
+                    abs_path = job_dir / rel_path
+                    abs_path.parent.mkdir(parents=True, exist_ok=True)
+                    abs_path.write_bytes(image_bytes)
+                    metadata = {
+                        "provider": "replicate",
+                        "model": "black-forest-labs/flux-1.1-pro",
+                        "prompt": replicate_prompt,
+                        "visual_type": visual_type,
+                        "prediction_id": prediction.get("id"),
+                    }
+                    asset = Asset(
+                        asset_id=f"asset-{scene.scene_id}",
+                        scene_id=scene.scene_id,
+                        kind="image",
+                        source="replicate",
+                        path=rel_path,
+                        metadata=metadata,
+                    )
+                    return asset, metadata, content_hash
+
+    # Pexels: try stock photos (either as primary or as fallback for failed replicate)
     if not dry_run and cfg.pexels_api_key:
         candidate = _best_pexels_candidate(pexels_pool, terms, orientation, used_photo_ids)
         if candidate is None and query.strip():
@@ -397,11 +444,8 @@ def _resolve_scene_asset(
                     )
                     return asset, metadata, content_hash
 
-    visual_type = visual_suggestions.get("type", "photo")
-    replicate_prompt = visual_suggestions.get("replicate_prompt", "").strip()
-    allow_replicate = visual_type != "photo" and bool(replicate_prompt)
-
-    if allow_replicate and not dry_run and cfg.replicate_api_token:
+    # Replicate fallback: if pexels was preferred but failed, or for non-photo types
+    if preferred_source != "replicate" and replicate_prompt and not dry_run and cfg.replicate_api_token:
         prediction = _call_replicate(replicate_prompt, cfg)
         if prediction:
             output_url = _extract_replicate_output_url(prediction)
@@ -471,6 +515,20 @@ def build_assets_step(
     pexels_pool: list[dict[str, Any]] = []
     if not dry_run and cfg.pexels_api_key:
         pexels_pool = _collect_pexels_pool(unique_queries, cfg)
+
+    # Ensure at least one scene uses replicate — if none are marked,
+    # pick the first scene with a non-empty replicate_prompt and force it
+    has_replicate = any(
+        (s.visual_suggestions or {}).get("image_source") == "replicate"
+        for s in scenes
+    )
+    if not has_replicate and cfg.replicate_api_token:
+        for s in scenes:
+            vs = s.visual_suggestions or {}
+            if vs.get("replicate_prompt", "").strip():
+                vs["image_source"] = "replicate"
+                s.visual_suggestions = vs
+                break
 
     assets: list[Asset] = []
     registry_items: list[dict[str, Any]] = []

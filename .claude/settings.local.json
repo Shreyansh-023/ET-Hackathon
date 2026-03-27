@@ -4,7 +4,17 @@
       "Bash(ffmpeg -filters)",
       "Bash(brew info:*)",
       "Bash(brew uninstall:*)",
-      "Bash(brew install:*)"
+      "Bash(brew install:*)",
+      "Bash(rm -f /Users/aayushjha/Desktop/ET-Hackathon/jobs/20260326-051413-c17bebfa/renders/final.mp4 /Users/aayushjha/Desktop/ET-Hackathon/jobs/20260326-051413-c17bebfa/renders/preview.mp4 /Users/aayushjha/Desktop/ET-Hackathon/jobs/20260326-051413-c17bebfa/renders/thumbnail.jpg)",
+      "Bash(source venv/bin/activate)",
+      "Bash(python -m src.cli export 20260326-051413-c17bebfa)",
+      "Bash(python -m src.cli plan 20260327-054812-091b52ed)",
+      "Bash(python -m src.cli assets 20260327-054812-091b52ed)",
+      "Bash(python -m src.cli render 20260327-054812-091b52ed)",
+      "Bash(python -m src.cli export 20260327-054812-091b52ed)",
+      "Bash(grep -r \"pexels_search_queries\\\\|replicate_prompt\" /Users/aayushjha/Desktop/ET-Hackathon --include=*.py --include=*.md --include=*.txt -n)",
+      "Bash(python -m src.cli ingest fixtures/golden_article.txt --title \"Global Economy Shows Resilience Amid Trade and Policy Uncertainty\")",
+      "Bash(python -m src.cli plan 20260327-063448-cdced977)"
     ]
   }
 }

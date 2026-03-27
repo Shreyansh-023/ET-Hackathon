@@ -202,6 +202,13 @@ def _find_background_video() -> Path | None:
     )
 
 
+def _find_et_logo() -> Path | None:
+    return _find_project_asset(
+        ["ET Logo.*", "et logo.*", "ET_Logo.*", "et_logo.*"],
+        ["et", "logo"],
+    )
+
+
 def _find_header_image() -> Path | None:
     return _find_project_asset(
         ["Main header.*", "main header.*", "Main_header.*", "header.*"],
@@ -260,6 +267,7 @@ def _render_final(
     bg_music = _find_background_music()
     bg_video = _find_background_video()
     header_img = _find_header_image()
+    et_logo = _find_et_logo()
     headline = _read_headline(job_dir)
 
     # --- Build inputs ---
@@ -286,6 +294,12 @@ def _render_final(
         input_music_idx = (input_header_idx or input_bg_idx or 0) + 1
         cmd.extend(["-i", str(bg_music)])
 
+    # Input 4: ET logo
+    input_logo_idx = None
+    if et_logo:
+        input_logo_idx = (input_music_idx or input_header_idx or input_bg_idx or 0) + 1
+        cmd.extend(["-i", str(et_logo)])
+
     # --- Build filter_complex ---
     filters = []
 
@@ -296,20 +310,32 @@ def _render_final(
         # Layout measurements
         top_padding = 25                             # padding above ET header
         header_h = 161 if header_img else 0        # ET header height
-        header_gap = 15 if header_img else 0       # gap between header and headline
+        header_gap = 30 if header_img else 0       # gap between header and headline
 
-        # Dynamic headline: wrap text and size bar to fit
-        headline_lines = _wrap_headline(headline.upper(), max_chars=38) if headline else []
-        headline_font_size = 46
-        headline_line_h = headline_font_size + 12  # line height with padding
-        headline_bar_padding = 20                  # top+bottom padding inside bar
+        # Dynamic headline: wrap to fit inside the box with margins
+        # At font size 52, approx char width ~30px. Box width = 1080 - 2*20(margin) - 2*20(inner pad) = 1000px
+        # Safe max_chars ≈ 1000/30 ≈ 30 chars per line
+        headline_font_size = 52
+        headline_max_chars = 30
+        headline_lines = _wrap_headline(headline.upper(), max_chars=headline_max_chars) if headline else []
+
+        # If headline wraps to too many lines (>3), reduce font to fit
+        if len(headline_lines) > 3:
+            headline_font_size = 42
+            headline_max_chars = 36
+            headline_lines = _wrap_headline(headline.upper(), max_chars=headline_max_chars) if headline else []
+
+        headline_line_h = headline_font_size + 14  # line height with spacing
+        headline_bar_padding = 40                  # top+bottom inner padding
         headline_bar_h = (len(headline_lines) * headline_line_h + headline_bar_padding) if headline_lines else 0
 
-        top_section_h = top_padding + header_h + header_gap + headline_bar_h
         subtitle_area_h = 300                      # space for subtitles below video
-        pipeline_h = int(canvas_w * 1080 / 1920)   # 607
+        # Crop pipeline video to ~square (1:1) by trimming left/right, then scale to canvas width
+        # Input is 1920x1080 landscape → crop center 1080x1080 → scale to canvas_w x canvas_w
+        pipeline_h = canvas_w                       # 1080 (square after crop+scale)
 
-        # Position pipeline video below header+gap+headline, centered in remaining space
+        # Position pipeline video: leave space for header + gap + headline + gap
+        top_section_h = top_padding + header_h + header_gap + headline_bar_h
         remaining_h = canvas_h - top_section_h - subtitle_area_h
         pipeline_y = top_section_h + max(0, (remaining_h - pipeline_h) // 2)
 
@@ -322,8 +348,11 @@ def _render_final(
         else:
             filters.append(f"color=c=black:s={canvas_w}x{canvas_h}:r=30[bg_scaled]")
 
-        # 2. Scale pipeline video
-        filters.append(f"[0:v]scale={canvas_w}:{pipeline_h},setsar=1[pipeline_scaled]")
+        # 2. Crop pipeline video to square (center crop) then scale to canvas width
+        filters.append(
+            f"[0:v]crop=ih:ih:(iw-ih)/2:0,"
+            f"scale={canvas_w}:{pipeline_h},setsar=1[pipeline_scaled]"
+        )
 
         # 3. Header image
         if header_img:
@@ -340,18 +369,30 @@ def _render_final(
             filters.append(f"[{current_v}][header_scaled]overlay=0:{top_padding}[v2]")
             current_v = "v2"
 
-        # 6. Draw headline bar below header with gap (dark bar + multi-line bold text)
+        # 6. Draw headline bar below header with gap
+        #    Style: black semi-transparent box with white thin border,
+        #    first line golden yellow, remaining lines white.
         if headline_lines:
-            bar_y = top_padding + header_h + header_gap
-            # Dark semi-transparent bar
+            # Center headline bar between header bottom and pipeline video top
+            header_bottom = top_padding + header_h
+            gap_between = pipeline_y - header_bottom
+            bar_y = header_bottom + (gap_between - headline_bar_h) // 2
+
+            box_margin = 20  # left/right margin for the box
+            box_x = box_margin
+            box_w = canvas_w - 2 * box_margin
+            border_t = 2  # white border thickness
+            inner_pad_x = 16  # horizontal inner padding
+
+            # Semi-transparent black background box
             filters.append(
-                f"[{current_v}]drawbox=x=0:y={bar_y}:w={canvas_w}:h={headline_bar_h}"
-                f":color=black@0.80:t=fill[v3a]"
+                f"[{current_v}]drawbox=x={box_x}:y={bar_y}:w={box_w}:h={headline_bar_h}"
+                f":color=black@0.70:t=fill[v3a]"
             )
-            # Thin red accent line at top of headline bar
+            # White thin border (top, bottom, left, right)
             filters.append(
-                f"[v3a]drawbox=x=0:y={bar_y}:w={canvas_w}:h=4"
-                f":color=0xCC0000@1.0:t=fill[v3b]"
+                f"[v3a]drawbox=x={box_x}:y={bar_y}:w={box_w}:h={headline_bar_h}"
+                f":color=white@0.9:t={border_t}[v3b]"
             )
             current_v = "v3b"
 
@@ -363,10 +404,12 @@ def _render_final(
                 escaped_line = _escape_drawtext_value(line)
                 line_y = text_start_y + i * headline_line_h
                 tag = f"v3_line{i}"
+                # First line: golden yellow, rest: white
+                font_color = "0xFFD700" if i == 0 else "white"
                 filters.append(
                     f"[{current_v}]drawtext=text='{escaped_line}'"
-                    f":fontsize={headline_font_size}:fontcolor=white"
-                    f":borderw=1:bordercolor=white"
+                    f":fontsize={headline_font_size}:fontcolor={font_color}"
+                    f":borderw=2:bordercolor={font_color}"
                     f":x=(w-text_w)/2:y={line_y}[{tag}]"
                 )
                 current_v = tag
@@ -376,7 +419,7 @@ def _render_final(
         #    word-wrapped to max 2 lines, positioned in dedicated subtitle area.
         if can_burn and subtitles_path and subtitles_path.exists():
             srt_entries = _parse_srt(subtitles_path)
-            sub_font_size = 34
+            sub_font_size = 38
             sub_line_h = sub_font_size + 14      # line height with spacing
             sub_box_h = sub_line_h * 2 + 24      # 2 lines + top/bottom padding
             sub_box_y = pipeline_y + pipeline_h + 20  # 20px gap below video
@@ -439,7 +482,21 @@ def _render_final(
                     )
                     current_v = tag
 
-        # 8. Audio: mix narration + background music (increased bg volume)
+        # 8. ET Logo watermark in lower-left corner
+        if et_logo and input_logo_idx is not None:
+            logo_size = 80  # width & height of the logo
+            logo_margin = 30  # margin from edges
+            logo_y = canvas_h - logo_size - logo_margin
+            filters.append(
+                f"[{input_logo_idx}:v]scale={logo_size}:{logo_size}[et_logo_scaled]"
+            )
+            next_tag = f"v_logo"
+            filters.append(
+                f"[{current_v}][et_logo_scaled]overlay={logo_margin}:{logo_y}[{next_tag}]"
+            )
+            current_v = next_tag
+
+        # 9. Audio: mix narration + background music (increased bg volume)
         if bg_music:
             filters.append(f"[0:a]volume=1.0[narration]")
             filters.append(
