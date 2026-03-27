@@ -23,6 +23,7 @@ class PipelineConfig:
     groq_model: str
     pexels_api_key: str
     replicate_api_token: str
+    clip_drop_api_key: str
     nvidia_riva_api_key: str
     nvidia_riva_function_id: str
     nvidia_riva_uri: str
@@ -68,6 +69,7 @@ def load_config() -> PipelineConfig:
         groq_model=_env("GROQ_MODEL", "openai/gpt-oss-20b"),
         pexels_api_key=_env("PEXELS_API_KEY"),
         replicate_api_token=_env("REPLICATE_API_TOKEN"),
+        clip_drop_api_key=_env("CLIP_DROP_API"),
         nvidia_riva_api_key=_env("NVIDIA_RIVA_API_KEY"),
         nvidia_riva_function_id=_env("NVIDIA_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969"),
         nvidia_riva_uri=_env("NVIDIA_RIVA_URI", "grpc.nvcf.nvidia.com:443"),

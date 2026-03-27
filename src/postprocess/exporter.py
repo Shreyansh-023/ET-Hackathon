@@ -20,6 +20,8 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _run_command(cmd: list[str], *, cwd: Path) -> None:
+    if os.getenv("DEBUG_FFMPEG_CMD", "").strip().lower() in {"1", "true", "yes", "on"}:
+        print("FFMPEG CMD:", " ".join(cmd))
     try:
         completed = subprocess.run(
             cmd,
@@ -118,7 +120,60 @@ def _escape_drawtext(text: str) -> str:
     return text
 
 
-def _build_drawtext_filter_script(srt_path: Path, job_dir: Path) -> Path:
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _escape_ffmpeg_path(path: Path) -> str:
+    """Escape a path for ffmpeg filter values."""
+    resolved = path.resolve().as_posix()
+    if len(resolved) >= 2 and resolved[1] == ":":
+        resolved = f"{resolved[0]}\\:{resolved[2:]}"
+    return resolved.replace("'", "\\'")
+
+
+def _resolve_drawtext_fontfile() -> Path | None:
+    """Resolve a font that can render Devanagari text for drawtext."""
+    env_candidates = [
+        os.getenv("FFMPEG_FONT_FILE", "").strip(),
+        os.getenv("HINDI_FONT_FILE", "").strip(),
+    ]
+    candidates = [Path(p) for p in env_candidates if p]
+
+    root = _project_root()
+    candidates.extend(
+        [
+            root / "assets" / "fonts" / "NotoSansDevanagari-Regular.ttf",
+            root / "assets" / "fonts" / "Nirmala.ttc",
+            root / "assets" / "fonts" / "Nirmala.ttf",
+            Path("C:/Windows/Fonts/NotoSansDevanagari-Regular.ttf"),
+            Path("C:/Windows/Fonts/Nirmala.ttc"),
+            Path("C:/Windows/Fonts/Nirmala.ttf"),
+            Path("C:/Windows/Fonts/Mangal.ttf"),
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_subtitle_font_name() -> str:
+    """Resolve a libass font family name for subtitle rendering."""
+    return (
+        os.getenv("FFMPEG_FONT_NAME", "").strip()
+        or os.getenv("HINDI_FONT_NAME", "").strip()
+        or "Nirmala UI"
+    )
+
+
+def _build_drawtext_filter_script(
+    srt_path: Path,
+    job_dir: Path,
+    *,
+    fontfile: Path | None = None,
+) -> Path:
     """Build a drawtext filter script file from SRT — works without libass.
 
     Returns the path to the filter script file.
@@ -136,10 +191,14 @@ def _build_drawtext_filter_script(srt_path: Path, job_dir: Path) -> Path:
         escaped = _escape_drawtext(entry["text"])
         start = entry["start"]
         end = entry["end"]
+        fontfile_part = ""
+        if fontfile is not None:
+            fontfile_part = f":fontfile='{_escape_ffmpeg_path(fontfile)}'"
         # News-style subtitle: white text, semi-transparent dark box, bottom-center
         dt = (
             f"drawtext=text='{escaped}'"
-            f":fontsize=24"
+            f"{fontfile_part}"
+            f":fontsize=28"
             f":fontcolor=white"
             f":borderw=2"
             f":bordercolor=black"
@@ -156,12 +215,15 @@ def _build_drawtext_filter_script(srt_path: Path, job_dir: Path) -> Path:
     return script_path
 
 
-def _build_subtitle_filter(subtitles_path: Path) -> str:
+def _build_subtitle_filter(subtitles_path: Path, *, font_name: str | None = None) -> str:
     """Use libass subtitles filter if available."""
-    resolved = subtitles_path.resolve().as_posix()
-    if len(resolved) >= 2 and resolved[1] == ":":
-        resolved = f"{resolved[0]}\\:{resolved[2:]}"
-    path_value = resolved.replace("'", "\\'")
+    path_value = _escape_ffmpeg_path(subtitles_path)
+    if font_name:
+        safe_font_name = font_name.replace("'", "\\'")
+        return (
+            f"subtitles='{path_value}'"
+            f":force_style='FontName={safe_font_name},BorderStyle=1,Outline=1,Shadow=0'"
+        )
     return f"subtitles='{path_value}'"
 
 
@@ -276,6 +338,10 @@ def _render_final(
     header_img = _find_header_image()
     et_logo = _find_et_logo()
     headline = _read_headline(job_dir)
+    drawtext_fontfile = _resolve_drawtext_fontfile()
+    drawtext_font_part = ""
+    if drawtext_fontfile is not None:
+        drawtext_font_part = f":fontfile='{_escape_ffmpeg_path(drawtext_fontfile)}'"
 
     # --- Build inputs ---
     cmd = ["ffmpeg", "-y"]
@@ -324,13 +390,13 @@ def _render_final(
         # Safe max_chars ≈ 1000/30 ≈ 30 chars per line
         headline_font_size = 52
         headline_max_chars = 30
-        headline_lines = _wrap_headline(headline.upper(), max_chars=headline_max_chars) if headline else []
+        headline_lines = _wrap_headline(headline, max_chars=headline_max_chars) if headline else []
 
         # If headline wraps to too many lines (>3), reduce font to fit
         if len(headline_lines) > 3:
             headline_font_size = 42
             headline_max_chars = 36
-            headline_lines = _wrap_headline(headline.upper(), max_chars=headline_max_chars) if headline else []
+            headline_lines = _wrap_headline(headline, max_chars=headline_max_chars) if headline else []
 
         headline_line_h = headline_font_size + 14  # line height with spacing
         headline_bar_padding = 40                  # top+bottom inner padding
@@ -415,6 +481,7 @@ def _render_final(
                 font_color = "0xFFD700" if i == 0 else "white"
                 filters.append(
                     f"[{current_v}]drawtext=text='{escaped_line}'"
+                    f"{drawtext_font_part}"
                     f":fontsize={headline_font_size}:fontcolor={font_color}"
                     f":borderw=2:bordercolor={font_color}"
                     f":x=(w-text_w)/2:y={line_y}[{tag}]"
@@ -426,7 +493,7 @@ def _render_final(
         #    word-wrapped to max 2 lines, positioned in dedicated subtitle area.
         if can_burn and subtitles_path and subtitles_path.exists():
             srt_entries = _parse_srt(subtitles_path)
-            sub_font_size = 38
+            sub_font_size = 42
             sub_line_h = sub_font_size + 14      # line height with spacing
             sub_box_h = sub_line_h * 2 + 24      # 2 lines + top/bottom padding
             sub_box_y = pipeline_y + pipeline_h + 20  # 20px gap below video
@@ -479,6 +546,7 @@ def _render_final(
                     tag = f"v_s{si}l{li}"
                     filters.append(
                         f"[{current_v}]drawtext=text='{escaped}'"
+                        f"{drawtext_font_part}"
                         f":fontsize={sub_font_size}"
                         f":fontcolor=white"
                         f":borderw=1:bordercolor=black"
@@ -507,7 +575,7 @@ def _render_final(
         if bg_music:
             filters.append(f"[0:a]volume=1.0[narration]")
             filters.append(
-                f"[{input_music_idx}:a]volume=0.22,"
+                f"[{input_music_idx}:a]volume=0.40,"
                 f"afade=t=in:st=0:d=2,afade=t=out:st=0:d=3[bgm]"
             )
             filters.append(
@@ -525,9 +593,21 @@ def _render_final(
         # No background video/header/music — simple pass-through with subtitles
         if can_burn:
             if _has_subtitle_filter():
-                cmd.extend(["-vf", _build_subtitle_filter(subtitles_path)])
+                cmd.extend(
+                    [
+                        "-vf",
+                        _build_subtitle_filter(
+                            subtitles_path,
+                            font_name=_resolve_subtitle_font_name(),
+                        ),
+                    ]
+                )
             else:
-                script_path = _build_drawtext_filter_script(subtitles_path, job_dir)
+                script_path = _build_drawtext_filter_script(
+                    subtitles_path,
+                    job_dir,
+                    fontfile=drawtext_fontfile,
+                )
                 cmd.extend(["-filter_script:v", str(script_path)])
         cmd.extend(["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"])
 
@@ -549,6 +629,57 @@ def _render_final(
         ]
     )
     _run_command(cmd, cwd=job_dir)
+    return final_path
+
+
+def _apply_final_playback_speed(*, job_dir: Path, final_path: Path) -> Path:
+    """Apply a global playback speed adjustment to the final video.
+
+    FINAL_PLAYBACK_SPEED controls tempo where:
+    - 1.0 = unchanged
+    - 0.95 = ~5% slower
+    - 1.05 = ~5% faster
+    """
+    raw_speed = os.getenv("FINAL_PLAYBACK_SPEED", "0.95").strip()
+    try:
+        speed = float(raw_speed)
+    except ValueError as exc:
+        raise RenderPipelineError(f"Invalid FINAL_PLAYBACK_SPEED value: {raw_speed}") from exc
+
+    if speed <= 0:
+        raise RenderPipelineError("FINAL_PLAYBACK_SPEED must be greater than 0")
+    if abs(speed - 1.0) < 1e-9:
+        return final_path
+    if speed < 0.5 or speed > 2.0:
+        raise RenderPipelineError("FINAL_PLAYBACK_SPEED must be between 0.5 and 2.0")
+
+    video_pts_factor = 1.0 / speed
+    temp_path = final_path.with_name(f"{final_path.stem}.speed_tmp{final_path.suffix}")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(final_path),
+        "-filter:v",
+        f"setpts={video_pts_factor:.9f}*PTS",
+        "-filter:a",
+        f"atempo={speed:.9f}",
+        "-c:v",
+        "libx264",
+        "-preset",
+        os.getenv("FFMPEG_PRESET", "medium"),
+        "-crf",
+        os.getenv("FFMPEG_CRF", "22"),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        str(temp_path),
+    ]
+    _run_command(cmd, cwd=job_dir)
+    temp_path.replace(final_path)
     return final_path
 
 
@@ -635,6 +766,7 @@ def build_export_package(
                 subtitles_path=subtitles_path,
                 burn_subtitles=burn_subtitles,
             )
+            final_path = _apply_final_playback_speed(job_dir=job_dir, final_path=final_path)
         if force or not preview_path.exists():
             preview_path = _render_preview(job_dir=job_dir, final_path=final_path)
         if force or not thumbnail_path.exists():

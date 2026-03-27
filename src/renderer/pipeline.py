@@ -468,7 +468,7 @@ def _attempt_ffmpeg_run(
 
     # Generate a red transition bumper clip
     red_transition_path = scene_renders_dir / "red_transition.mp4"
-    transition_frames = 8  # ~0.27s at 30fps
+    transition_frames = int(os.getenv("RED_TRANSITION_FRAMES", "12"))  # ~0.40s at 30fps
     _generate_red_transition_clip(
         red_transition_path, width, height, fps, duration_frames=transition_frames,
     )

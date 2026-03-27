@@ -23,10 +23,12 @@ from src.common.retry import run_with_retry
 
 
 PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
-REPLICATE_PREDICT_URL = "https://api.replicate.com/v1/models/black-forest-labs/flux-1.1-pro/predictions"
+CLIPDROP_TEXT_TO_IMAGE_URL = "https://clipdrop-api.co/text-to-image/v1"
 TOKEN_SPLIT = re.compile(r"[^a-zA-Z0-9]+")
 MAX_PEXELS_QUERY_COUNT = 12
-MIN_PEXELS_QUERY_COUNT = 9
+MIN_PEXELS_QUERY_COUNT = 6
+MIN_AI_IMAGES = 1
+MAX_AI_IMAGES = 3
 
 
 @dataclass(frozen=True)
@@ -243,88 +245,39 @@ def _save_placeholder(scene: Scene, job_dir: Path) -> tuple[str, dict[str, Any],
     return rel_path, {"provider": "placeholder", "reason": "all_providers_failed"}, file_hash
 
 
-def _call_replicate(prompt: str, cfg: PipelineConfig) -> dict[str, Any] | None:
-    if not cfg.replicate_api_token:
+def _call_clipdrop_text_to_image(prompt: str, cfg: PipelineConfig) -> bytes | None:
+    if not cfg.clip_drop_api_key:
         return None
 
-    headers = {
-        "Authorization": f"Token {cfg.replicate_api_token}",
-        "Content-Type": "application/json",
-    }
-    # Append news-agency style direction to every prompt
+    # Keep visual style direction consistent with existing pipeline look-and-feel.
     news_style_suffix = (
         " Use bold, vibrant red and yellow accent colors throughout the image. "
         "Style it as a professional news broadcast graphic with high contrast and clean design."
     )
     styled_prompt = prompt.rstrip(". ") + "." + news_style_suffix
 
-    payload = {
-        "input": {
-            "prompt": styled_prompt,
-            "aspect_ratio": "1:1",
-            "width": 1080,
-            "height": 1080,
-            "output_format": "png",
-            "safety_tolerance": 2,
-        }
-    }
+    headers = {"x-api-key": cfg.clip_drop_api_key}
 
-    def _request() -> dict[str, Any] | None:
+    def _request() -> bytes | None:
         try:
-            response = requests.post(REPLICATE_PREDICT_URL, headers=headers, json=payload, timeout=30)
+            response = requests.post(
+                CLIPDROP_TEXT_TO_IMAGE_URL,
+                headers=headers,
+                files={"prompt": (None, styled_prompt)},
+                timeout=60,
+            )
         except requests.RequestException as exc:
-            raise ProviderPipelineError(f"Replicate request failed: {exc}") from exc
+            raise ProviderPipelineError(f"Clipdrop request failed: {exc}") from exc
 
         if response.status_code in {408, 425, 429, 500, 502, 503, 504}:
-            raise ProviderPipelineError(f"Replicate transient failure: {response.status_code}")
+            raise ProviderPipelineError(f"Clipdrop transient failure: {response.status_code}")
         if response.status_code >= 400:
             return None
-        data = response.json()
-        return data if isinstance(data, dict) else None
-
-    prediction = run_with_retry(_request, retries=2)
-    if not prediction:
-        return None
-
-    status_url = prediction.get("urls", {}).get("get")
-    if not isinstance(status_url, str) or not status_url:
-        return None
-
-    for _ in range(30):
-        try:
-            poll = requests.get(status_url, headers=headers, timeout=30)
-        except requests.RequestException as exc:
-            raise ProviderPipelineError(f"Replicate polling failed: {exc}") from exc
-        if poll.status_code >= 400:
+        if not response.content:
             return None
-        poll_data = poll.json()
-        status = poll_data.get("status")
-        if status == "succeeded":
-            return poll_data if isinstance(poll_data, dict) else None
-        if status in {"failed", "canceled"}:
-            return None
-        time.sleep(1.0)
-    return None
+        return response.content
 
-
-def _extract_replicate_output_url(payload: dict[str, Any]) -> str | None:
-    output = payload.get("output")
-    if isinstance(output, str) and output:
-        return output
-    if isinstance(output, list):
-        for item in output:
-            if isinstance(item, str) and item:
-                return item
-            if isinstance(item, dict):
-                candidate = item.get("url")
-                if isinstance(candidate, str) and candidate:
-                    return candidate
-    if isinstance(output, dict):
-        for key in ("url", "image", "output"):
-            candidate = output.get(key)
-            if isinstance(candidate, str) and candidate:
-                return candidate
-    return None
+    return run_with_retry(_request, retries=2)
 
 
 def _best_pexels_candidate(
@@ -354,6 +307,8 @@ def _resolve_scene_asset(
     pexels_pool: list[dict[str, Any]],
     used_photo_ids: set[int],
     prev_hash: str | None,
+    ai_images_used: int,
+    enforce_ai_generation: bool,
     *,
     dry_run: bool,
     logger=None,
@@ -369,39 +324,72 @@ def _resolve_scene_asset(
     # Determine preferred image source from Gemini's suggestion
     preferred_source = visual_suggestions.get("image_source", "pexels")
     visual_type = visual_suggestions.get("type", "photo")
-    replicate_prompt = visual_suggestions.get("replicate_prompt", "").strip()
+    ai_prompt = visual_suggestions.get("replicate_prompt", "").strip()
 
     # --- Try preferred source first, then fallback to the other ---
 
-    if preferred_source == "replicate" and replicate_prompt and not dry_run and cfg.replicate_api_token:
-        # Replicate-preferred: try AI generation first
-        prediction = _call_replicate(replicate_prompt, cfg)
-        if prediction:
-            output_url = _extract_replicate_output_url(prediction)
-            if output_url:
-                image_bytes = _download_bytes(output_url)
-                content_hash = sha256(image_bytes).hexdigest()
-                if not (prev_hash and content_hash == prev_hash):
-                    rel_path = f"assets/generated/{scene.scene_id}.png"
-                    abs_path = job_dir / rel_path
-                    abs_path.parent.mkdir(parents=True, exist_ok=True)
-                    abs_path.write_bytes(image_bytes)
-                    metadata = {
-                        "provider": "replicate",
-                        "model": "black-forest-labs/flux-1.1-pro",
-                        "prompt": replicate_prompt,
-                        "visual_type": visual_type,
-                        "prediction_id": prediction.get("id"),
-                    }
-                    asset = Asset(
-                        asset_id=f"asset-{scene.scene_id}",
-                        scene_id=scene.scene_id,
-                        kind="image",
-                        source="replicate",
-                        path=rel_path,
-                        metadata=metadata,
-                    )
-                    return asset, metadata, content_hash
+    ai_allowed = ai_images_used < MAX_AI_IMAGES
+    prefer_ai = preferred_source == "replicate" or enforce_ai_generation
+
+    def _try_ai_generation() -> tuple[Asset, dict[str, Any], str] | None:
+        if not ai_allowed or not ai_prompt or dry_run or not cfg.clip_drop_api_key:
+            return None
+
+        image_bytes = _call_clipdrop_text_to_image(ai_prompt, cfg)
+        if not image_bytes:
+            return None
+
+        content_hash = sha256(image_bytes).hexdigest()
+        if prev_hash and content_hash == prev_hash:
+            return None
+
+        rel_path = f"assets/generated/{scene.scene_id}.png"
+        abs_path = job_dir / rel_path
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(image_bytes)
+        metadata = {
+            "provider": "clipdrop_text_to_image",
+            "model": "clipdrop-text-to-image-v1",
+            "prompt": ai_prompt,
+            "visual_type": visual_type,
+        }
+        asset = Asset(
+            asset_id=f"asset-{scene.scene_id}",
+            scene_id=scene.scene_id,
+            kind="image",
+            source="replicate",
+            path=rel_path,
+            metadata=metadata,
+        )
+        return asset, metadata, content_hash
+
+    if prefer_ai:
+        ai_result = _try_ai_generation()
+        if ai_result is not None:
+            return ai_result
+        if enforce_ai_generation:
+            rel_path, metadata, content_hash = _save_placeholder(scene, job_dir)
+            metadata = {
+                **metadata,
+                "reason": "ai_generation_failed_when_minimum_required",
+                "ai_prompt": ai_prompt,
+            }
+            asset = Asset(
+                asset_id=f"asset-{scene.scene_id}",
+                scene_id=scene.scene_id,
+                kind="image",
+                source="placeholder",
+                path=rel_path,
+                metadata=metadata,
+            )
+            if logger:
+                logger.emit(
+                    "warning",
+                    "asset_placeholder_used",
+                    scene_id=scene.scene_id,
+                    reason="ai_generation_failed_when_minimum_required",
+                )
+            return asset, metadata, content_hash
 
     # Pexels: try stock photos (either as primary or as fallback for failed replicate)
     if not dry_run and cfg.pexels_api_key:
@@ -444,35 +432,11 @@ def _resolve_scene_asset(
                     )
                     return asset, metadata, content_hash
 
-    # Replicate fallback: if pexels was preferred but failed, or for non-photo types
-    if preferred_source != "replicate" and replicate_prompt and not dry_run and cfg.replicate_api_token:
-        prediction = _call_replicate(replicate_prompt, cfg)
-        if prediction:
-            output_url = _extract_replicate_output_url(prediction)
-            if output_url:
-                image_bytes = _download_bytes(output_url)
-                content_hash = sha256(image_bytes).hexdigest()
-                if not (prev_hash and content_hash == prev_hash):
-                    rel_path = f"assets/generated/{scene.scene_id}.png"
-                    abs_path = job_dir / rel_path
-                    abs_path.parent.mkdir(parents=True, exist_ok=True)
-                    abs_path.write_bytes(image_bytes)
-                    metadata = {
-                        "provider": "replicate",
-                        "model": "black-forest-labs/flux-1.1-pro",
-                        "prompt": replicate_prompt,
-                        "visual_type": visual_type,
-                        "prediction_id": prediction.get("id"),
-                    }
-                    asset = Asset(
-                        asset_id=f"asset-{scene.scene_id}",
-                        scene_id=scene.scene_id,
-                        kind="image",
-                        source="replicate",
-                        path=rel_path,
-                        metadata=metadata,
-                    )
-                    return asset, metadata, content_hash
+    # AI fallback: if pexels was preferred but failed and AI generation is still allowed.
+    if not prefer_ai:
+        ai_result = _try_ai_generation()
+        if ai_result is not None:
+            return ai_result
 
     rel_path, metadata, content_hash = _save_placeholder(scene, job_dir)
     asset = Asset(
@@ -500,7 +464,7 @@ def build_assets_step(
 
     # Extract Pexels queries from all scenes
     all_pexels_queries = []
-    for scene in scenes:
+    for idx, scene in enumerate(scenes):
         if scene.visual_suggestions and scene.visual_suggestions.get("pexels_search_queries"):
             all_pexels_queries.extend(scene.visual_suggestions["pexels_search_queries"])
     
@@ -516,24 +480,36 @@ def build_assets_step(
     if not dry_run and cfg.pexels_api_key:
         pexels_pool = _collect_pexels_pool(unique_queries, cfg)
 
-    # Ensure at least one scene uses replicate — if none are marked,
-    # pick the first scene with a non-empty replicate_prompt and force it
-    has_replicate = any(
-        (s.visual_suggestions or {}).get("image_source") == "replicate"
-        for s in scenes
-    )
-    if not has_replicate and cfg.replicate_api_token:
-        for s in scenes:
-            vs = s.visual_suggestions or {}
-            if vs.get("replicate_prompt", "").strip():
-                vs["image_source"] = "replicate"
-                s.visual_suggestions = vs
+    # Build candidate set for AI generation and enforce policy: min 1, max 3 AI images.
+    ai_candidate_indices: list[int] = []
+    for idx, scene in enumerate(scenes):
+        vs = scene.visual_suggestions or {}
+        if vs.get("replicate_prompt", "").strip():
+            ai_candidate_indices.append(idx)
+
+    preferred_ai_indices = [
+        idx for idx in ai_candidate_indices
+        if (scenes[idx].visual_suggestions or {}).get("image_source") == "replicate"
+    ]
+
+    selected_ai_indices = set(preferred_ai_indices[:MAX_AI_IMAGES])
+    if len(selected_ai_indices) < MIN_AI_IMAGES and ai_candidate_indices:
+        for idx in ai_candidate_indices:
+            if idx not in selected_ai_indices:
+                selected_ai_indices.add(idx)
+            if len(selected_ai_indices) >= MIN_AI_IMAGES:
                 break
+
+    if not dry_run and cfg.clip_drop_api_key and not selected_ai_indices:
+        raise ProviderPipelineError(
+            "AI image policy requires at least one AI-capable scene, but no scene contains an AI prompt"
+        )
 
     assets: list[Asset] = []
     registry_items: list[dict[str, Any]] = []
     prev_hash: str | None = None
     used_photo_ids: set[int] = set()
+    ai_images_used = 0
 
     for scene in scenes:
         asset, provider_meta, current_hash = _resolve_scene_asset(
@@ -544,10 +520,14 @@ def build_assets_step(
             pexels_pool,
             used_photo_ids,
             prev_hash,
+            ai_images_used,
+            enforce_ai_generation=(idx in selected_ai_indices),
             dry_run=dry_run,
             logger=logger,
         )
         assets.append(asset)
+        if asset.source == "replicate":
+            ai_images_used += 1
         
         visual_suggestions = scene.visual_suggestions or {}
         pexels_queries = visual_suggestions.get("pexels_search_queries", [])
@@ -567,6 +547,11 @@ def build_assets_step(
         )
         prev_hash = current_hash or prev_hash
 
+    if not dry_run and cfg.clip_drop_api_key and ai_images_used < MIN_AI_IMAGES:
+        raise ProviderPipelineError(
+            f"AI image policy requires at least {MIN_AI_IMAGES} AI image(s), but generated {ai_images_used}"
+        )
+
     audio_result = build_voiceover_and_subtitles(
         scenes,
         cfg,
@@ -585,6 +570,13 @@ def build_assets_step(
                 "pexels_query_count": len(unique_queries),
                 "pexels_queries": unique_queries,
                 "pool_size": len(pexels_pool),
+                "ai_image_policy": {
+                    "min": MIN_AI_IMAGES,
+                    "max": MAX_AI_IMAGES,
+                    "requested": len(selected_ai_indices),
+                    "generated": ai_images_used,
+                    "provider": "clipdrop_text_to_image",
+                },
             },
             "assets": registry_items,
             "voiceover": {
