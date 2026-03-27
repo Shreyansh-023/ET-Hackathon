@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class PipelineConfig:
+    language: str  # "english" or "hindi"
     duration_seconds: int
     aspect_ratio: str
     style_preset: str
@@ -39,7 +40,20 @@ def _env(name: str, default: str = "") -> str:
 
 def load_config() -> PipelineConfig:
     load_dotenv(override=False)
+    language = _env("LANGUAGE", "english").lower()
+    if language not in ("english", "hindi"):
+        language = "english"
+
+    # Override TTS voice/language based on pipeline language
+    if language == "hindi":
+        riva_voice = _env("NVIDIA_RIVA_VOICE", "Long")
+        riva_language = _env("NVIDIA_RIVA_LANGUAGE", "hi-IN")
+    else:
+        riva_voice = _env("NVIDIA_RIVA_VOICE", "Magpie-Multilingual.EN-US.Aria")
+        riva_language = _env("NVIDIA_RIVA_LANGUAGE", "en-US")
+
     return PipelineConfig(
+        language=language,
         duration_seconds=int(_env("DURATION_SECONDS", "90")),
         aspect_ratio=_env("ASPECT_RATIO", "9:16"),
         style_preset=_env("STYLE_PRESET", "documentary_clean"),
@@ -57,8 +71,8 @@ def load_config() -> PipelineConfig:
         nvidia_riva_api_key=_env("NVIDIA_RIVA_API_KEY"),
         nvidia_riva_function_id=_env("NVIDIA_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969"),
         nvidia_riva_uri=_env("NVIDIA_RIVA_URI", "grpc.nvcf.nvidia.com:443"),
-        nvidia_riva_voice=_env("NVIDIA_RIVA_VOICE", "Magpie-Multilingual.EN-US.Aria"),
-        nvidia_riva_language=_env("NVIDIA_RIVA_LANGUAGE", "en-US"),
+        nvidia_riva_voice=riva_voice,
+        nvidia_riva_language=riva_language,
         groq_stt_model=_env("GROQ_STT_MODEL", "whisper-large-v3"),
         retry_limits={
             "ingest": 1,

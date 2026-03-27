@@ -132,7 +132,7 @@ def _generate_storyboard_with_gemini(
     *,
     llm_enabled: bool,
 ) -> tuple[list[dict[str, Any]], str, str, ArticleUnderstanding]:
-    prompt = _build_gemini_storyboard_prompt(article)
+    prompt = _build_gemini_storyboard_prompt(article, language=cfg.language)
     if not llm_enabled:
         understanding = _article_understanding_from_text(article)
         scenes = [scene.model_dump() for scene in _fallback_template_plan(article, understanding)]
@@ -201,7 +201,45 @@ def _understanding_from_payload(payload: dict[str, Any], article: Article) -> Ar
     )
 
 
-def _build_gemini_storyboard_prompt(article: Article) -> str:
+def _build_gemini_storyboard_prompt(article: Article, language: str = "english") -> str:
+    if language == "hindi":
+        return (
+            "You are a professional TV news anchor and broadcast producer for a Hindi-language news channel. "
+            "Your job is to turn the provided article into a 90-second Hindi news broadcast segment — "
+            "the kind you would see on Aaj Tak, NDTV India, or Zee News. "
+            "Write ALL narration in Hindi (Devanagari script) in the authoritative, clear, and measured tone of a Hindi news anchor delivering a live report. "
+            "Use short, punchy sentences in Hindi. Open with a strong hook that grabs attention. "
+            "Address the viewer directly where appropriate (e.g. 'आइए जानते हैं अब तक क्या हुआ'). "
+            "Keep the language factual, avoid sensationalism, and maintain journalistic neutrality. "
+            "On-screen text should also be in Hindi (Devanagari script) and resemble news lower-thirds and headline chyrons (brief, high-impact phrases — not full sentences). "
+            "Focus ONLY on writing the script — narration and on-screen text. Do NOT include any visual suggestions, image queries, or image prompts. "
+            "Return ONLY the JSON object, with no additional text or markdown formatting.\n\n"
+            "IMPORTANT: Both 'narration' and 'on_screen_text' MUST be in Hindi (Devanagari script). "
+            "The 'headline' and 'summary' should also be in Hindi.\n\n"
+            "The JSON object should have this exact schema:\n"
+            "{\n"
+            '  "headline": "string (in Hindi)",\n'
+            '  "summary": "string (in Hindi)",\n'
+            '  "scenes": [\n'
+            "    {\n"
+            '      "id": "scene-001",\n'
+            '      "narration": "string (in Hindi)",\n'
+            '      "on_screen_text": "string (in Hindi)"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "Guidelines:\n"
+            "- The total video duration should be approximately 90 seconds.\n"
+            "- Create 8-12 scenes.\n"
+            "- Write narration exactly as a Hindi news anchor would read it on-air: confident, concise, and conversational but professional.\n"
+            "- Scene 1 must be a compelling news hook (e.g. 'आज की बड़ी खबर…', 'एक बड़ा घटनाक्रम सामने आया है…').\n"
+            "- The final scene should wrap up like a broadcast sign-off with a forward-looking statement or call to stay tuned.\n"
+            "- On-screen text should be short headline/chyron style in Hindi, NOT a copy of the narration.\n"
+            "- Ensure the narration flows logically and tells a coherent story based on the article.\n\n"
+            f"Article Title: {article.title or 'Untitled'}\n"
+            f"Article Text:\n{article.clean_article_text}"
+        )
+
     return (
         "You are a professional TV news anchor and broadcast producer. "
         "Your job is to turn the provided article into a 90-second news broadcast segment — "
@@ -239,12 +277,17 @@ def _build_gemini_storyboard_prompt(article: Article) -> str:
 
 
 def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, Any]]) -> str:
-    scenes_text = json.dumps(scenes_json, indent=2)
+    scenes_text = json.dumps(scenes_json, indent=2, ensure_ascii=False)
     return (
         "You are an expert visual researcher and news broadcast art director. "
         "You are given a news article and its scene-by-scene script (narration + on-screen text). "
+        "The script may be in Hindi or another language — that does NOT matter. "
         "Your job is to generate highly specific, detailed image search queries and AI image generation prompts "
         "for each scene so that the visuals closely match what a real TV news broadcast would show.\n\n"
+        "CRITICAL: ALL your output MUST be in ENGLISH only. "
+        "All pexels_search_queries must be in English. All replicate_prompt must be in English. "
+        "All description fields must be in English. Even if the input narration is in Hindi or another language, "
+        "you must write everything in English.\n\n"
         "Return ONLY a JSON array with one object per scene. Each object must have this schema:\n"
         "{\n"
         '  "id": "scene-001",\n'
