@@ -343,6 +343,7 @@ def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, An
         "- For graphs/charts/data: describe data points, axis labels, use red and yellow for chart colors, news-graphic style.\n"
         "- For abstract/conceptual scenes: describe the composition with red/yellow accents, high contrast, news broadcast feel.\n"
         "- For photo-type scenes: still provide a detailed prompt describing the ideal image as a fallback.\n\n"
+        "- Some example instead of giving pexels query as (states under code of conduct India) say (state of india) , instead of (energy sector growth India) say something specifi for which finding photo is easier and specifi like (power plant photo)\n\n"
         f"Article Title: {article.title or 'Untitled'}\n"
         f"Article Text:\n{article.clean_article_text}\n\n"
         f"Scene Script:\n{scenes_text}"

@@ -239,6 +239,9 @@ def _has_subtitle_filter() -> bool:
         return False
 
 
+MAX_DRAWTEXT_SUBTITLE_CUES = 40
+
+
 def _find_project_asset(patterns: list[str], keywords: list[str]) -> Path | None:
     """Find a file in the project root matching patterns and keywords."""
     project_root = Path(__file__).resolve().parent.parent.parent
@@ -493,69 +496,79 @@ def _render_final(
         #    word-wrapped to max 2 lines, positioned in dedicated subtitle area.
         if can_burn and subtitles_path and subtitles_path.exists():
             srt_entries = _parse_srt(subtitles_path)
-            sub_font_size = 42
-            sub_line_h = sub_font_size + 14      # line height with spacing
-            sub_box_h = sub_line_h * 2 + 24      # 2 lines + top/bottom padding
-            sub_box_y = pipeline_y + pipeline_h + 20  # 20px gap below video
-            sub_box_x = 40                       # left margin
-            sub_box_w = canvas_w - 80            # 40px margin each side
-            accent_w = 6                         # red accent bar width
-            sub_text_x = sub_box_x + accent_w + 16  # text starts after accent+padding
-            max_sub_chars = 44                   # chars per line before wrapping
+            use_subtitles_filter = _has_subtitle_filter() and len(srt_entries) > MAX_DRAWTEXT_SUBTITLE_CUES
 
-            # Persistent subtitle background box (always visible, like a lower-third)
-            filters.append(
-                f"[{current_v}]drawbox=x={sub_box_x}:y={sub_box_y}"
-                f":w={sub_box_w}:h={sub_box_h}"
-                f":color=black@0.75:t=fill[v_sub_bg]"
-            )
-            # Red accent bar on left edge of box
-            filters.append(
-                f"[v_sub_bg]drawbox=x={sub_box_x}:y={sub_box_y}"
-                f":w={accent_w}:h={sub_box_h}"
-                f":color=0xCC0000@1.0:t=fill[v_sub_accent]"
-            )
-            current_v = "v_sub_accent"
+            if use_subtitles_filter:
+                subtitle_filter = _build_subtitle_filter(
+                    subtitles_path,
+                    font_name=_resolve_subtitle_font_name(),
+                )
+                filters.append(f"[{current_v}]{subtitle_filter}[v_sub_ass]")
+                current_v = "v_sub_ass"
+            else:
+                sub_font_size = 42
+                sub_line_h = sub_font_size + 14      # line height with spacing
+                sub_box_h = sub_line_h * 2 + 24      # 2 lines + top/bottom padding
+                sub_box_y = pipeline_y + pipeline_h + 20  # 20px gap below video
+                sub_box_x = 40                       # left margin
+                sub_box_w = canvas_w - 80            # 40px margin each side
+                accent_w = 6                         # red accent bar width
+                sub_text_x = sub_box_x + accent_w + 16  # text starts after accent+padding
+                max_sub_chars = 44                   # chars per line before wrapping
 
-            for si, entry in enumerate(srt_entries):
-                # Word-wrap subtitle text to max 2 lines
-                words = entry["text"].split()
-                lines: list[str] = []
-                cur_line = ""
-                for word in words:
-                    test = (cur_line + " " + word).strip()
-                    if len(test) <= max_sub_chars:
-                        cur_line = test
-                    else:
-                        if cur_line:
-                            lines.append(cur_line)
-                        cur_line = word
-                        if len(lines) >= 2:
-                            break
-                if cur_line and len(lines) < 2:
-                    lines.append(cur_line)
-                if not lines:
-                    continue
+                # Persistent subtitle background box (always visible, like a lower-third)
+                filters.append(
+                    f"[{current_v}]drawbox=x={sub_box_x}:y={sub_box_y}"
+                    f":w={sub_box_w}:h={sub_box_h}"
+                    f":color=black@0.75:t=fill[v_sub_bg]"
+                )
+                # Red accent bar on left edge of box
+                filters.append(
+                    f"[v_sub_bg]drawbox=x={sub_box_x}:y={sub_box_y}"
+                    f":w={accent_w}:h={sub_box_h}"
+                    f":color=0xCC0000@1.0:t=fill[v_sub_accent]"
+                )
+                current_v = "v_sub_accent"
 
-                start_t = entry["start"]
-                end_t = entry["end"]
+                for si, entry in enumerate(srt_entries):
+                    # Word-wrap subtitle text to max 2 lines
+                    words = entry["text"].split()
+                    lines: list[str] = []
+                    cur_line = ""
+                    for word in words:
+                        test = (cur_line + " " + word).strip()
+                        if len(test) <= max_sub_chars:
+                            cur_line = test
+                        else:
+                            if cur_line:
+                                lines.append(cur_line)
+                            cur_line = word
+                            if len(lines) >= 2:
+                                break
+                    if cur_line and len(lines) < 2:
+                        lines.append(cur_line)
+                    if not lines:
+                        continue
 
-                for li, line_text in enumerate(lines):
-                    escaped = _escape_drawtext_value(line_text)
-                    line_y = sub_box_y + 12 + li * sub_line_h
-                    tag = f"v_s{si}l{li}"
-                    filters.append(
-                        f"[{current_v}]drawtext=text='{escaped}'"
-                        f"{drawtext_font_part}"
-                        f":fontsize={sub_font_size}"
-                        f":fontcolor=white"
-                        f":borderw=1:bordercolor=black"
-                        f":x={sub_text_x}"
-                        f":y={line_y}"
-                        f":enable='between(t\\,{start_t:.3f}\\,{end_t:.3f})'"
-                        f"[{tag}]"
-                    )
-                    current_v = tag
+                    start_t = entry["start"]
+                    end_t = entry["end"]
+
+                    for li, line_text in enumerate(lines):
+                        escaped = _escape_drawtext_value(line_text)
+                        line_y = sub_box_y + 12 + li * sub_line_h
+                        tag = f"v_s{si}l{li}"
+                        filters.append(
+                            f"[{current_v}]drawtext=text='{escaped}'"
+                            f"{drawtext_font_part}"
+                            f":fontsize={sub_font_size}"
+                            f":fontcolor=white"
+                            f":borderw=1:bordercolor=black"
+                            f":x={sub_text_x}"
+                            f":y={line_y}"
+                            f":enable='between(t\\,{start_t:.3f}\\,{end_t:.3f})'"
+                            f"[{tag}]"
+                        )
+                        current_v = tag
 
         # 8. ET Logo watermark in lower-left corner
         if et_logo and input_logo_idx is not None:

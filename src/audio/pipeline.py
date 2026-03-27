@@ -13,7 +13,9 @@ from src.common.errors import IOPipelineError, ProviderPipelineError
 from src.common.models import Scene
 
 
-SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?।॥])\s+")
+DEVANAGARI_CHAR = re.compile(r"[\u0900-\u097F]")
+ARABIC_CHAR = re.compile(r"[\u0600-\u06FF]")
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,13 @@ class AudioBuildResult:
     narration_text: str
     sentence_timings: list[SentenceTiming]
     duration_seconds: float
+
+
+def _has_script(lines: list[SentenceTiming], pattern: re.Pattern[str]) -> bool:
+    for line in lines:
+        if pattern.search(line.text):
+            return True
+    return False
 
 
 def _read_wav_bytes(wav_bytes: bytes) -> tuple[int, int, bytes]:
@@ -416,6 +425,16 @@ def build_voiceover_and_subtitles(
             subtitle_lines = sentence_timings
     else:
         subtitle_lines = sentence_timings
+
+    # Guardrail for Hindi: if STT output drifts to Arabic/Urdu script,
+    # keep subtitle wording in source Devanagari script from narration text.
+    if cfg.language == "hindi" and sentence_timings:
+        stt_has_devanagari = _has_script(subtitle_lines, DEVANAGARI_CHAR)
+        stt_has_arabic = _has_script(subtitle_lines, ARABIC_CHAR)
+        source_has_devanagari = _has_script(sentence_timings, DEVANAGARI_CHAR)
+        if source_has_devanagari and (stt_has_arabic or not stt_has_devanagari):
+            subtitle_lines = sentence_timings
+            stt_provider = f"{stt_provider}_script_fallback"
 
     # Ensure strict monotonic timing and no overlap in exported subtitle files.
     normalized_lines: list[SentenceTiming] = []
