@@ -111,63 +111,46 @@ export default function Home() {
   return (
     <div className="page">
       <header className="site-header">
-        <div className="inner">
-          <div className="logo">
-            <div className="logo-box">ET</div>
-            <div>
-              <div className="logo-text">The Economic Times</div>
-              <div className="logo-sub">Reel Studio</div>
-            </div>
+        <div className="inner header-bar">
+          <span className="header-spacer" aria-hidden="true" />
+          <div className="header-center">
+            <img
+              className="main-logo"
+              src="/Main%20header.jpeg"
+              alt="The Economic Times"
+            />
           </div>
-          <nav className="nav">
-            <a href="#">Home</a>
-            <a href="#">Markets</a>
-            <a href="#">Economy</a>
-            <a href="#">Industry</a>
-            <a href="#">Politics</a>
-            <a href="#">Tech</a>
+          <nav className="header-nav" aria-label="Automation workflow">
+            <span className="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                <path d="M12 2l2.6 5.7 6.2 1-4.4 4.3 1 6.3L12 16.8 6.6 19.3l1-6.3L3.2 8.7l6.2-1L12 2z" />
+              </svg>
+            </span>
+            <span className="header-nav-text">Text-to-reel automation workflow</span>
           </nav>
         </div>
       </header>
 
-      <section className="breaking">
-        <div className="breaking-banner">
-          <span className="breaking-tag">BREAKING</span>
-          <span>Create reels from trusted articles in seconds.</span>
-        </div>
-      </section>
-
       <main className="main">
+        <section className="hero-intro">
+          <span className="hero-chip">
+            <span className="hero-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                <path d="M12 2l2.6 5.7 6.2 1-4.4 4.3 1 6.3L12 16.8 6.6 19.3l1-6.3L3.2 8.7l6.2-1L12 2z" />
+              </svg>
+            </span>
+            Modern News AI Video Editor
+          </span>
+          <h1>Textual News Article to Modern News Reel in minutes.</h1>
+          <p>
+            Paste a story and let the pipeline plan scenes, generate assets,
+            synthesize audio, and deliver a publish-ready reel.
+          </p>
+        </section>
         <div className="hero-grid">
-          <section className="panel reel-panel">
-            <div>
-              <h2>Live Reel Preview</h2>
-              <p>Output renders here once export completes.</p>
-            </div>
-            <div className="reel-frame">
-              {videoUrl ? (
-                <video
-                  src={videoUrl}
-                  poster={thumbnailUrl || undefined}
-                  controls
-                  playsInline
-                />
-              ) : (
-                <div className="reel-placeholder">
-                  <strong>No render yet</strong>
-                  <div>Submit an article to start the pipeline.</div>
-                </div>
-              )}
-            </div>
-            <div className="reel-meta">
-              <span>{jobId ? `Job ${jobId}` : "Ready"}</span>
-              <span>{jobId ? `Stage: ${currentStageLabel}` : "Waiting"}</span>
-            </div>
-          </section>
-
           <section className="panel form-panel">
             <div>
-              <h2>Generate News Reel</h2>
+              <h2>News Article Input</h2>
               <p>Paste article text. Language is detected automatically.</p>
             </div>
             <form onSubmit={handleSubmit}>
@@ -202,7 +185,7 @@ export default function Home() {
                   >
                     <span className="stage-dot" />
                     <span>{item.label}</span>
-                    <span className="badge">{item.status}</span>
+                    <span className="stage-status">{item.status}</span>
                   </div>
                 ))}
               </div>
@@ -212,6 +195,32 @@ export default function Home() {
                 </div>
               ) : null}
               {error ? <div className="error">{error}</div> : null}
+            </div>
+          </section>
+
+          <section className="panel reel-panel">
+            <div>
+              <h2>Live Reel Preview</h2>
+              <p>Preview renders here once export completes.</p>
+            </div>
+            <div className="reel-frame">
+              {videoUrl ? (
+                <video
+                  src={videoUrl}
+                  poster={thumbnailUrl || undefined}
+                  controls
+                  playsInline
+                />
+              ) : (
+                <div className="reel-placeholder">
+                  <strong>No render yet</strong>
+                  <div>Submit an article to start the pipeline.</div>
+                </div>
+              )}
+            </div>
+            <div className="reel-meta">
+              <span>{jobId ? `Job ${jobId}` : "Ready"}</span>
+              <span>{jobId ? `Stage: ${currentStageLabel}` : "Waiting"}</span>
             </div>
           </section>
         </div>

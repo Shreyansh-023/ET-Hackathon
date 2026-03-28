@@ -1,13 +1,13 @@
-import { Cormorant_Garamond, Work_Sans } from "next/font/google";
+import { Space_Grotesk, Sora } from "next/font/google";
 import "./globals.css";
 
-const serif = Cormorant_Garamond({
+const display = Space_Grotesk({
   subsets: ["latin"],
-  weight: ["600", "700"],
-  variable: "--font-serif"
+  weight: ["500", "600", "700"],
+  variable: "--font-display"
 });
 
-const sans = Work_Sans({
+const sans = Sora({
   subsets: ["latin"],
   weight: ["400", "500", "600"],
   variable: "--font-sans"
@@ -20,7 +20,7 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${serif.variable} ${sans.variable}`}>
+    <html lang="en" className={`${display.variable} ${sans.variable}`}>
       <body>{children}</body>
     </html>
   );
