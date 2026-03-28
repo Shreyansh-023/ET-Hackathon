@@ -11,11 +11,25 @@ from typing import Any
 from src.common.config import PipelineConfig
 from src.common.errors import IOPipelineError, ProviderPipelineError
 from src.common.models import Scene
+from src.common.text_utils import detect_language
 
 
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?।॥])\s+")
 DEVANAGARI_CHAR = re.compile(r"[\u0900-\u097F]")
 ARABIC_CHAR = re.compile(r"[\u0600-\u06FF]")
+
+DEFAULT_VOICE_BY_LANGUAGE = {
+    "english": "Magpie-Multilingual.EN-US.Aria",
+    "hindi": "Magpie-Multilingual.HI-IN.Aria",
+}
+DEFAULT_STT_LANG_BY_LANGUAGE = {
+    "english": "en",
+    "hindi": "hi",
+}
+DEFAULT_TTS_LANG_BY_LANGUAGE = {
+    "english": "en-US",
+    "hindi": "hi-IN",
+}
 
 
 @dataclass(frozen=True)
@@ -125,11 +139,57 @@ def _make_riva_service(cfg: PipelineConfig):
     return riva.client.SpeechSynthesisService(auth)
 
 
+def _normalize_language_name(language: str) -> str:
+    lowered = (language or "").strip().lower()
+    if lowered in {"hindi", "hi", "hi-in"}:
+        return "hindi"
+    if lowered in {"english", "en", "en-us"}:
+        return "english"
+    return ""
+
+
+def _resolve_runtime_language(article_language: str, narration_text: str) -> str:
+    normalized = _normalize_language_name(article_language)
+    if normalized:
+        return normalized
+    return detect_language(narration_text)
+
+
+def _resolve_tts_language_code(runtime_language: str, cfg: PipelineConfig) -> str:
+    if runtime_language == "hindi":
+        return DEFAULT_TTS_LANG_BY_LANGUAGE["hindi"]
+    if runtime_language == "english":
+        return DEFAULT_TTS_LANG_BY_LANGUAGE["english"]
+    configured = (cfg.nvidia_riva_language or "").strip()
+    return configured or DEFAULT_TTS_LANG_BY_LANGUAGE["english"]
+
+
+def _resolve_stt_language_code(runtime_language: str, cfg: PipelineConfig) -> str:
+    if runtime_language in DEFAULT_STT_LANG_BY_LANGUAGE:
+        return DEFAULT_STT_LANG_BY_LANGUAGE[runtime_language]
+    configured = (cfg.nvidia_riva_language or "en-US").strip()
+    return configured.split("-")[0]
+
+
+def _resolve_voice_name(runtime_language: str, cfg: PipelineConfig) -> str:
+    if runtime_language in DEFAULT_VOICE_BY_LANGUAGE:
+        return DEFAULT_VOICE_BY_LANGUAGE[runtime_language]
+    configured = (cfg.nvidia_riva_voice or "").strip()
+    return configured or DEFAULT_VOICE_BY_LANGUAGE["english"]
+
+
 _RIVA_MAX_RETRIES = 5
 _RIVA_BASE_DELAY = 2.0  # seconds
 
 
-def _synthesize_riva_sentence(sentence: str, cfg: PipelineConfig, *, service=None) -> bytes:
+def _synthesize_riva_sentence(
+    sentence: str,
+    cfg: PipelineConfig,
+    *,
+    language_code: str,
+    voice_name: str,
+    service=None,
+) -> bytes:
     import riva.client  # type: ignore
 
     if service is None:
@@ -145,8 +205,8 @@ def _synthesize_riva_sentence(sentence: str, cfg: PipelineConfig, *, service=Non
             try:
                 response = service.synthesize(
                     text=chunk,
-                    language_code=cfg.nvidia_riva_language,
-                    voice_name=cfg.nvidia_riva_voice,
+                    language_code=language_code,
+                    voice_name=voice_name,
                     sample_rate_hz=22050,
                     encoding=riva.client.AudioEncoding.LINEAR_PCM,
                 )
@@ -212,6 +272,8 @@ def _timings_from_groq(
     audio_path: Path,
     script_text: str,
     cfg: PipelineConfig,
+    *,
+    stt_language: str,
 ) -> list[SentenceTiming]:
     try:
         from groq import Groq  # type: ignore
@@ -222,8 +284,6 @@ def _timings_from_groq(
         raise ProviderPipelineError("GROQ_API_KEY is not configured")
 
     model = cfg.groq_stt_model or "whisper-large-v3"
-    language = (cfg.nvidia_riva_language or "en-US").split("-")[0]
-
     client = Groq(api_key=cfg.groq_api_key)
     try:
         with audio_path.open("rb") as audio_file:
@@ -232,7 +292,7 @@ def _timings_from_groq(
                 model=model,
                 response_format="verbose_json",
                 timestamp_granularities=["word", "segment"],
-                language=language,
+                language=stt_language,
             )
     except Exception as exc:
         raise ProviderPipelineError(f"Groq STT request failed: {exc}") from exc
@@ -275,6 +335,8 @@ def _timings_from_offline_whisper(
     audio_path: Path,
     script_text: str,
     cfg: PipelineConfig,
+    *,
+    stt_language: str,
 ) -> list[SentenceTiming]:
     try:
         import whisper  # type: ignore
@@ -291,7 +353,7 @@ def _timings_from_offline_whisper(
     try:
         result: dict[str, Any] = model.transcribe(
             str(audio_path),
-            language=(cfg.nvidia_riva_language or "en-US").split("-")[0],
+            language=stt_language,
             fp16=False,
             verbose=False,
         )
@@ -364,11 +426,16 @@ def build_voiceover_and_subtitles(
     cfg: PipelineConfig,
     job_dir: Path,
     *,
+    article_language: str = "",
     dry_run: bool,
     logger=None,
 ) -> AudioBuildResult:
     sentences = _sentences_from_scenes(scenes)
     narration_text = " ".join(sentences).strip()
+    runtime_language = _resolve_runtime_language(article_language, narration_text)
+    tts_language = _resolve_tts_language_code(runtime_language, cfg)
+    stt_language = _resolve_stt_language_code(runtime_language, cfg)
+    voice_name = _resolve_voice_name(runtime_language, cfg)
 
     use_provider = bool(
         cfg.nvidia_riva_api_key and cfg.nvidia_riva_function_id and cfg.nvidia_riva_uri and not dry_run
@@ -384,7 +451,13 @@ def build_voiceover_and_subtitles(
         for idx, sentence in enumerate(sentences):
             if idx > 0:
                 time.sleep(0.5)  # pace requests to avoid rate limits
-            pcm_bytes = _synthesize_riva_sentence(sentence, cfg, service=riva_service)
+            pcm_bytes = _synthesize_riva_sentence(
+                sentence,
+                cfg,
+                language_code=tts_language,
+                voice_name=voice_name,
+                service=riva_service,
+            )
             duration = len(pcm_bytes) / (sample_rate * sample_width)
             sentence_timings.append(
                 SentenceTiming(
@@ -407,19 +480,39 @@ def build_voiceover_and_subtitles(
 
     subtitle_lines: list[SentenceTiming]
     stt_provider = "sentence_timing_fallback"
-    if not dry_run and cfg.groq_api_key:
+    if runtime_language == "hindi":
+        # Hindi STT timing can drift noticeably; sentence-level TTS timings are
+        # deterministic and keep subtitle onset aligned with narration.
+        subtitle_lines = sentence_timings
+        stt_provider = "sentence_timing_hindi"
+    elif not dry_run and cfg.groq_api_key:
         try:
-            subtitle_lines = _timings_from_groq(voiceover_path, narration_text, cfg)
+            subtitle_lines = _timings_from_groq(
+                voiceover_path,
+                narration_text,
+                cfg,
+                stt_language=stt_language,
+            )
             stt_provider = "groq_whisper"
         except ProviderPipelineError:
             try:
-                subtitle_lines = _timings_from_offline_whisper(voiceover_path, narration_text, cfg)
+                subtitle_lines = _timings_from_offline_whisper(
+                    voiceover_path,
+                    narration_text,
+                    cfg,
+                    stt_language=stt_language,
+                )
                 stt_provider = "offline_whisper"
             except ProviderPipelineError:
                 subtitle_lines = sentence_timings
     elif not dry_run:
         try:
-            subtitle_lines = _timings_from_offline_whisper(voiceover_path, narration_text, cfg)
+            subtitle_lines = _timings_from_offline_whisper(
+                voiceover_path,
+                narration_text,
+                cfg,
+                stt_language=stt_language,
+            )
             stt_provider = "offline_whisper"
         except ProviderPipelineError:
             subtitle_lines = sentence_timings
@@ -428,7 +521,7 @@ def build_voiceover_and_subtitles(
 
     # Guardrail for Hindi: if STT output drifts to Arabic/Urdu script,
     # keep subtitle wording in source Devanagari script from narration text.
-    if cfg.language == "hindi" and sentence_timings:
+    if runtime_language == "hindi" and sentence_timings:
         stt_has_devanagari = _has_script(subtitle_lines, DEVANAGARI_CHAR)
         stt_has_arabic = _has_script(subtitle_lines, ARABIC_CHAR)
         source_has_devanagari = _has_script(sentence_timings, DEVANAGARI_CHAR)
@@ -458,8 +551,9 @@ def build_voiceover_and_subtitles(
 
     audio_manifest_rel_path = "audio/audio_manifest.json"
     manifest_payload = {
-        "voice_profile": cfg.nvidia_riva_voice,
-        "language": cfg.nvidia_riva_language,
+        "voice_profile": voice_name,
+        "language": tts_language,
+        "runtime_language": runtime_language,
         "function_id": cfg.nvidia_riva_function_id,
         "tts_provider": "nvidia_riva" if use_provider else "fallback_silence",
         "stt_provider": stt_provider,

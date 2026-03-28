@@ -10,3 +10,4 @@ groq>=0.19,<1.0
 nvidia-riva-client>=2.17,<3.0
 soundfile>=0.13,<1.0
 openai-whisper>=20240930
+langid>=1.1,<2.0

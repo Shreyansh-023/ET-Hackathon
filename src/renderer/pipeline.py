@@ -56,6 +56,40 @@ def _run_command(cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None
         raise RenderPipelineError(f"Command failed ({completed.returncode}): {' '.join(cmd)} :: {details[:1200]}")
 
 
+def _probe_duration_seconds(path: Path, *, cwd: Path) -> float | None:
+    if shutil.which("ffprobe") is None:
+        return None
+
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+
+    raw = (completed.stdout or "").strip()
+    try:
+        return round(float(raw), 3)
+    except ValueError:
+        return None
+
+
 def _aspect_to_dimensions(aspect_ratio: str) -> tuple[int, int]:
     normalized = aspect_ratio.strip()
     if normalized == "16:9":
@@ -128,11 +162,20 @@ def _build_scene_manifest(
     *,
     job_dir: Path,
     fps: int,
+    target_scene_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
 
-    for scene in scenes:
+    base_durations = [max(1.0 / fps, scene.end - scene.start) for scene in scenes]
+    planned_scene_total_seconds = sum(base_durations)
+    duration_scale = 1.0
+    if target_scene_duration_seconds is not None and planned_scene_total_seconds > 0:
+        duration_scale = max(0.25, target_scene_duration_seconds / planned_scene_total_seconds)
+
+    cursor_seconds = 0.0
+
+    for scene, base_duration_seconds in zip(scenes, base_durations):
         asset = assets_by_scene.get(scene.scene_id)
         if not asset:
             raise ValidationPipelineError(f"No visual asset for scene {scene.scene_id}")
@@ -145,10 +188,12 @@ def _build_scene_manifest(
         if not abs_image_path.exists():
             raise ValidationPipelineError(f"Scene {scene.scene_id} asset does not exist: {abs_image_path}")
 
-        start_frame = int(round(scene.start * fps))
-        end_frame = int(round(scene.end * fps))
+        scaled_duration_seconds = max(1.0 / fps, base_duration_seconds * duration_scale)
+        start_frame = int(round(cursor_seconds * fps))
+        end_frame = int(round((cursor_seconds + scaled_duration_seconds) * fps))
         if end_frame <= start_frame:
             end_frame = start_frame + 1
+        cursor_seconds = end_frame / float(fps)
 
         if abs_image_path.suffix.lower() not in (SUPPORTED_IMAGE_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS):
             warnings.append(
@@ -177,6 +222,13 @@ def _build_scene_manifest(
         "scene_count": len(rows),
         "templates": list(SCENE_TEMPLATES.values()),
         "scenes": rows,
+        "timing_policy": {
+            "planned_scene_seconds": round(planned_scene_total_seconds, 3),
+            "target_scene_seconds": round(target_scene_duration_seconds, 3)
+            if target_scene_duration_seconds is not None
+            else None,
+            "duration_scale": round(duration_scale, 5),
+        },
         "warnings": warnings,
     }
 
@@ -600,12 +652,22 @@ def build_render_stage(job_id: str, cfg: PipelineConfig, *, job_dir: Path, logge
     try:
         scenes = _load_scenes(job_dir)
         assets_by_scene = _load_assets_by_scene(job_dir)
+
+        # Retiming keeps scene changes aligned with generated voiceover cadence.
+        transition_frames = int(os.getenv("RED_TRANSITION_FRAMES", "12"))
+        transition_seconds_total = max(0, len(scenes) - 1) * (transition_frames / float(fps))
+        voiceover_duration = _probe_duration_seconds(job_dir / "audio" / "voiceover.wav", cwd=job_dir)
+        target_scene_duration_seconds: float | None = None
+        if voiceover_duration is not None and voiceover_duration > 0:
+            target_scene_duration_seconds = max(1.0 / fps, voiceover_duration - transition_seconds_total)
+
         manifest = _build_scene_manifest(
             job_id,
             scenes,
             assets_by_scene,
             job_dir=job_dir,
             fps=fps,
+            target_scene_duration_seconds=target_scene_duration_seconds,
         )
 
         manifest_path = job_dir / "renders" / "scene_manifest.json"

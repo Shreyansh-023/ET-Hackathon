@@ -457,6 +457,7 @@ def build_assets_step(
     cfg: PipelineConfig,
     job_dir: Path,
     *,
+    article_language: str = "",
     dry_run: bool,
     logger=None,
 ) -> Step3Result:
@@ -556,6 +557,7 @@ def build_assets_step(
         scenes,
         cfg,
         job_dir,
+        article_language=article_language,
         dry_run=dry_run,
         logger=logger,
     )

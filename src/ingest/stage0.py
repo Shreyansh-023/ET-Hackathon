@@ -7,7 +7,7 @@ import uuid
 
 from src.common.errors import IOPipelineError
 from src.common.models import Article
-from src.common.text_utils import detect_language_placeholder, normalize_text
+from src.common.text_utils import detect_language, normalize_text
 
 
 def _read_source(source: str) -> tuple[str, str]:
@@ -30,7 +30,7 @@ def _read_source(source: str) -> tuple[str, str]:
 def ingest_article(source: str, title: str = "") -> Article:
     raw_text, source_label = _read_source(source)
     cleaned = normalize_text(raw_text)
-    language = detect_language_placeholder(cleaned)
+    language = detect_language(cleaned)
     return Article(
         article_id=uuid.uuid4().hex,
         source=source_label,

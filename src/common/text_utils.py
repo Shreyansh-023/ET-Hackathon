@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import langid
 
 
 MULTISPACE = re.compile(r"\s+")
@@ -14,10 +15,24 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def detect_language_placeholder(text: str) -> str:
+def detect_language(text: str) -> str:
+    """Return pipeline language label: 'english' or 'hindi'."""
     if not text:
-        return "unknown"
-    lowered = text.lower()
-    common_english = {"the", "and", "is", "to", "of", "in"}
-    score = sum(1 for token in lowered.split() if token in common_english)
-    return "en" if score >= 2 else "unknown"
+        return "english"
+
+    normalized = normalize_text(text)
+    if not normalized:
+        return "english"
+
+    language_code, _confidence = langid.classify(normalized)
+    if language_code == "hi":
+        return "hindi"
+    if language_code == "en":
+        return "english"
+
+    return "english"
+
+
+def detect_language_placeholder(text: str) -> str:
+    """Backwards-compatible shim for older imports."""
+    return detect_language(text)

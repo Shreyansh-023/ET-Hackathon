@@ -132,7 +132,10 @@ def _generate_storyboard_with_gemini(
     *,
     llm_enabled: bool,
 ) -> tuple[list[dict[str, Any]], str, str, ArticleUnderstanding]:
-    prompt = _build_gemini_storyboard_prompt(article, language=cfg.language)
+    article_language = (article.language or "").strip().lower()
+    fallback_language = (cfg.language or "english").strip().lower()
+    prompt_language = article_language if article_language in {"english", "hindi"} else fallback_language
+    prompt = _build_gemini_storyboard_prompt(article, language=prompt_language)
     if not llm_enabled:
         understanding = _article_understanding_from_text(article)
         scenes = [scene.model_dump() for scene in _fallback_template_plan(article, understanding)]

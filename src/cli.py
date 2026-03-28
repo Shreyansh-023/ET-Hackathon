@@ -138,10 +138,19 @@ def assets(
 
     def _work() -> list[Asset]:
         job_dir = repo.job_path(job_id)
+        article_payload = _read_json(job_dir / "parsed" / "article.json")
+        article = validate_payload(Article, article_payload)
         scenes_payload = _read_json(job_dir / "storyboard" / "scenes.json")
         scenes = [validate_payload(Scene, row) for row in scenes_payload]
         logger = repo.get_stage_logger(job_id, "assets")
-        step3 = build_assets_step(scenes, cfg, job_dir, dry_run=dry_run, logger=logger)
+        step3 = build_assets_step(
+            scenes,
+            cfg,
+            job_dir,
+            article_language=article.language,
+            dry_run=dry_run,
+            logger=logger,
+        )
         built_assets = step3.assets
         for item in built_assets:
             validate_payload(Asset, item.model_dump())

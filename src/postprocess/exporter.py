@@ -341,6 +341,7 @@ def _render_final(
     header_img = _find_header_image()
     et_logo = _find_et_logo()
     headline = _read_headline(job_dir)
+    target_duration = _probe_duration_seconds(input_video, cwd=job_dir)
     drawtext_fontfile = _resolve_drawtext_fontfile()
     drawtext_font_part = ""
     if drawtext_fontfile is not None:
@@ -417,10 +418,17 @@ def _render_final(
 
         # 1. Background video
         if bg_video:
-            filters.append(
-                f"[{input_bg_idx}:v]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
-                f"crop={canvas_w}:{canvas_h},setsar=1[bg_scaled]"
-            )
+            if target_duration is not None and target_duration > 0:
+                filters.append(
+                    f"[{input_bg_idx}:v]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+                    f"crop={canvas_w}:{canvas_h},setsar=1,"
+                    f"tpad=stop_mode=clone:stop_duration={target_duration:.3f}[bg_scaled]"
+                )
+            else:
+                filters.append(
+                    f"[{input_bg_idx}:v]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+                    f"crop={canvas_w}:{canvas_h},setsar=1[bg_scaled]"
+                )
         else:
             filters.append(f"color=c=black:s={canvas_w}x{canvas_h}:r=30[bg_scaled]")
 
@@ -493,7 +501,7 @@ def _render_final(
 
         # 7. News broadcast-style subtitles below the video
         #    Professional look: dark box, white text, red accent bar on left,
-        #    word-wrapped to max 2 lines, positioned in dedicated subtitle area.
+        #    word-wrapped across as many lines as needed within subtitle area.
         if can_burn and subtitles_path and subtitles_path.exists():
             srt_entries = _parse_srt(subtitles_path)
             use_subtitles_filter = _has_subtitle_filter() and len(srt_entries) > MAX_DRAWTEXT_SUBTITLE_CUES
@@ -508,7 +516,10 @@ def _render_final(
             else:
                 sub_font_size = 42
                 sub_line_h = sub_font_size + 14      # line height with spacing
-                sub_box_h = sub_line_h * 2 + 24      # 2 lines + top/bottom padding
+                # Keep one fewer line than the max available to reduce strip height.
+                available_sub_lines = max(1, ((subtitle_area_h - 40) - 24) // sub_line_h)
+                max_sub_lines = max(1, available_sub_lines - 1)
+                sub_box_h = max_sub_lines * sub_line_h + 24
                 sub_box_y = pipeline_y + pipeline_h + 20  # 20px gap below video
                 sub_box_x = 40                       # left margin
                 sub_box_w = canvas_w - 80            # 40px margin each side
@@ -531,11 +542,16 @@ def _render_final(
                 current_v = "v_sub_accent"
 
                 for si, entry in enumerate(srt_entries):
-                    # Word-wrap subtitle text to max 2 lines
-                    words = entry["text"].split()
+                    # Word-wrap subtitle text and preserve existing line breaks.
+                    words = entry["text"].replace("\n", " \n ").split()
                     lines: list[str] = []
                     cur_line = ""
                     for word in words:
+                        if word == "\n":
+                            if cur_line:
+                                lines.append(cur_line)
+                                cur_line = ""
+                            continue
                         test = (cur_line + " " + word).strip()
                         if len(test) <= max_sub_chars:
                             cur_line = test
@@ -543,12 +559,13 @@ def _render_final(
                             if cur_line:
                                 lines.append(cur_line)
                             cur_line = word
-                            if len(lines) >= 2:
-                                break
-                    if cur_line and len(lines) < 2:
+                    if cur_line:
                         lines.append(cur_line)
                     if not lines:
                         continue
+
+                    # Keep all wrapped text as long as it fits in subtitle area.
+                    lines = lines[:max_sub_lines]
 
                     start_t = entry["start"]
                     end_t = entry["end"]
@@ -584,7 +601,15 @@ def _render_final(
             )
             current_v = next_tag
 
+        # 8b. Clamp visual timeline to the pipeline video duration.
+        if target_duration is not None and target_duration > 0:
+            filters.append(
+                f"[{current_v}]trim=duration={target_duration:.3f},setpts=PTS-STARTPTS[v_trim]"
+            )
+            current_v = "v_trim"
+
         # 9. Audio: mix narration + background music (increased bg volume)
+        audio_out_tag = "aout"
         if bg_music:
             filters.append(f"[0:a]volume=1.0[narration]")
             filters.append(
@@ -592,15 +617,21 @@ def _render_final(
                 f"afade=t=in:st=0:d=2,afade=t=out:st=0:d=3[bgm]"
             )
             filters.append(
-                f"[narration][bgm]amix=inputs=2:duration=shortest:dropout_transition=3,"
+                f"[narration][bgm]amix=inputs=2:duration=first:dropout_transition=3,"
                 f"loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
             )
         else:
             filters.append(f"[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
 
+        if target_duration is not None and target_duration > 0:
+            filters.append(
+                f"[{audio_out_tag}]atrim=duration={target_duration:.3f},asetpts=N/SR/TB[aout_trim]"
+            )
+            audio_out_tag = "aout_trim"
+
         filter_str = ";\n".join(filters)
         cmd.extend(["-filter_complex", filter_str])
-        cmd.extend(["-map", f"[{current_v}]", "-map", "[aout]"])
+        cmd.extend(["-map", f"[{current_v}]", "-map", f"[{audio_out_tag}]"])
 
     else:
         # No background video/header/music — simple pass-through with subtitles
