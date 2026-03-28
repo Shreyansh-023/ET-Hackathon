@@ -82,6 +82,7 @@ def load_config() -> PipelineConfig:
             "ingest": 1,
             "plan": 2,
             "assets": 2,
+            "audio": 1,
             "render": 0,
             "export": 0,
         },

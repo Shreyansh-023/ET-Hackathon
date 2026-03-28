@@ -334,6 +334,7 @@ def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, An
         "- Use 'graph' or 'chart' ONLY when the narration includes specific data, numbers, or statistics.\n\n"
         "-- Some example: instead of giving a vague stock query like (states under code of conduct India), say (state of India map), and instead of (energy sector growth India), use something specific like (power plant photo).\n\n"
         "Guidelines for replicate_prompt (AI-generated images):\n"
+        "- Never generate AI generated human beings as they often look fake and can be problematic. Instead, for scenes involving people, use 'serpapi' with queries that include the person's name and a description of the scene (e.g. 'Narendra Modi speaking at podium', 'Joe Biden meeting with world leaders', 'Angela Merkel at press conference').\n"
         "- ALWAYS provide a detailed prompt for every scene (never leave empty).\n"
         "- Prompt depth requirement: write 80-180 words with rich scene detail and production intent.\n"
         "- Include: subject, setting, camera framing, composition, lighting, color direction, and mood.\n"

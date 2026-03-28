@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,13 @@ DEFAULT_TTS_LANG_BY_LANGUAGE = {
 @dataclass(frozen=True)
 class SentenceTiming:
     text: str
+    start: float
+    end: float
+
+
+@dataclass(frozen=True)
+class WordTiming:
+    word: str
     start: float
     end: float
 
@@ -268,13 +276,168 @@ def _line_wrap(text: str, max_chars: int = 42) -> list[str]:
     return lines
 
 
+def _resolve_subtitle_timing_source() -> str:
+    raw = os.getenv("SUBTITLE_TIMING_SOURCE", "auto").strip().lower()
+    if raw in {"auto", "word", "stt", "tts"}:
+        return raw
+    return "auto"
+
+
+def _resolve_subtitle_grouping_settings() -> tuple[int, float, int]:
+    def _int_env(name: str, default: int, min_value: int) -> int:
+        raw = os.getenv(name, str(default)).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+        return max(min_value, value)
+
+    def _float_env(name: str, default: float, min_value: float) -> float:
+        raw = os.getenv(name, str(default)).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            value = default
+        return max(min_value, value)
+
+    max_words = _int_env("SUBTITLE_MAX_WORDS", 12, 3)
+    min_words = _int_env("SUBTITLE_MIN_WORDS", 2, 1)
+    max_seconds = _float_env("SUBTITLE_MAX_SECONDS", 4.2, 1.2)
+    return max_words, max_seconds, min_words
+
+
+def _clean_cue_text(text: str) -> str:
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text.strip()
+
+
+def _ends_with_hard_punct(token: str) -> bool:
+    stripped = token.strip()
+    if stripped.endswith("..."):
+        return True
+    return stripped.endswith((".", "!", "?", "\u0964", "\u0965", "\u2026"))
+
+
+def _ends_with_soft_punct(token: str) -> bool:
+    stripped = token.strip()
+    return stripped.endswith((",", ";", ":"))
+
+
+def _normalize_word_timings(words: list[WordTiming]) -> list[WordTiming]:
+    normalized: list[WordTiming] = []
+    cursor = 0.0
+    for word in words:
+        token = str(word.word).strip()
+        if not token:
+            continue
+        start = float(word.start)
+        end = float(word.end)
+        if end <= start:
+            end = start + 0.05
+        start = max(cursor, start)
+        end = max(start + 0.05, end)
+        normalized.append(WordTiming(word=token, start=round(start, 3), end=round(end, 3)))
+        cursor = end
+    return normalized
+
+
+def _extract_groq_word_timings(payload: dict[str, Any]) -> list[WordTiming]:
+    words: list[WordTiming] = []
+
+    def _append_rows(rows: list[Any]) -> None:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            token = str(row.get("word") or row.get("text") or "").strip()
+            if not token:
+                continue
+            try:
+                start = float(row.get("start", 0.0))
+                end = float(row.get("end", start + 0.05))
+            except (TypeError, ValueError):
+                continue
+            if end <= start:
+                end = start + 0.05
+            words.append(WordTiming(word=token, start=round(start, 3), end=round(end, 3)))
+
+    top_level = payload.get("words") if isinstance(payload, dict) else None
+    if isinstance(top_level, list):
+        _append_rows(top_level)
+
+    segments = payload.get("segments") if isinstance(payload, dict) else None
+    if isinstance(segments, list):
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            seg_words = seg.get("words")
+            if isinstance(seg_words, list):
+                _append_rows(seg_words)
+
+    return words
+
+
+def _group_word_timings(
+    words: list[WordTiming],
+    *,
+    max_words: int,
+    max_seconds: float,
+    min_words: int,
+) -> list[SentenceTiming]:
+    if not words:
+        return []
+
+    cues: list[SentenceTiming] = []
+    current: list[str] = []
+    cue_start: float | None = None
+
+    for word in words:
+        token = word.word.strip()
+        if not token:
+            continue
+        if cue_start is None:
+            cue_start = word.start
+        current.append(token)
+        cue_end = word.end
+
+        word_count = len(current)
+        duration = cue_end - (cue_start or cue_end)
+        hard_boundary = _ends_with_hard_punct(token)
+        soft_boundary = _ends_with_soft_punct(token)
+
+        if (
+            hard_boundary
+            or word_count >= max_words
+            or duration >= max_seconds
+            or (soft_boundary and word_count >= min_words)
+        ):
+            text = _clean_cue_text(" ".join(current))
+            cues.append(
+                SentenceTiming(text=text, start=round(cue_start or 0.0, 3), end=round(cue_end, 3))
+            )
+            current = []
+            cue_start = None
+
+    if current:
+        text = _clean_cue_text(" ".join(current))
+        end_time = words[-1].end
+        cues.append(
+            SentenceTiming(text=text, start=round(cue_start or 0.0, 3), end=round(end_time, 3))
+        )
+
+    return cues
+
+
 def _timings_from_groq(
     audio_path: Path,
     script_text: str,
     cfg: PipelineConfig,
     *,
     stt_language: str,
-) -> list[SentenceTiming]:
+    use_word_timestamps: bool,
+    max_words: int,
+    max_seconds: float,
+    min_words: int,
+) -> tuple[list[SentenceTiming], list[WordTiming]]:
     try:
         from groq import Groq  # type: ignore
     except Exception as exc:  # pragma: no cover - dependency/environment dependent
@@ -305,6 +468,19 @@ def _timings_from_groq(
     else:
         payload = {}
 
+    word_timings_raw = _extract_groq_word_timings(payload)
+    word_timings = _normalize_word_timings(word_timings_raw)
+    if use_word_timestamps and word_timings:
+        lines = _group_word_timings(
+            word_timings,
+            max_words=max_words,
+            max_seconds=max_seconds,
+            min_words=min_words,
+        )
+        if not lines:
+            raise ProviderPipelineError("Groq STT word timings could not be grouped")
+        return lines, word_timings
+
     segments = payload.get("segments") if isinstance(payload, dict) else None
     if not isinstance(segments, list) or not segments:
         raise ProviderPipelineError("Groq STT returned no segment-level timestamps")
@@ -328,7 +504,7 @@ def _timings_from_groq(
     # Keep caption wording anchored to narration script when possible.
     if script_text and len(lines) == 1:
         lines[0] = SentenceTiming(text=script_text.strip(), start=lines[0].start, end=lines[0].end)
-    return lines
+    return lines, []
 
 
 def _timings_from_offline_whisper(
@@ -479,21 +655,33 @@ def build_voiceover_and_subtitles(
     duration_seconds = round(len(merged_frames) / (sample_rate * sample_width), 3)
 
     subtitle_lines: list[SentenceTiming]
+    word_timings: list[WordTiming] = []
     stt_provider = "sentence_timing_fallback"
+    timing_source = _resolve_subtitle_timing_source()
+
     if runtime_language == "hindi":
         # Hindi STT timing can drift noticeably; sentence-level TTS timings are
         # deterministic and keep subtitle onset aligned with narration.
         subtitle_lines = sentence_timings
         stt_provider = "sentence_timing_hindi"
+    elif timing_source == "tts":
+        subtitle_lines = sentence_timings
+        stt_provider = "sentence_timing_forced"
     elif not dry_run and cfg.groq_api_key:
+        max_words, max_seconds, min_words = _resolve_subtitle_grouping_settings()
+        use_word_timestamps = timing_source in {"auto", "word"}
         try:
-            subtitle_lines = _timings_from_groq(
+            subtitle_lines, word_timings = _timings_from_groq(
                 voiceover_path,
                 narration_text,
                 cfg,
                 stt_language=stt_language,
+                use_word_timestamps=use_word_timestamps,
+                max_words=max_words,
+                max_seconds=max_seconds,
+                min_words=min_words,
             )
-            stt_provider = "groq_whisper"
+            stt_provider = "groq_word" if (use_word_timestamps and word_timings) else "groq_whisper"
         except ProviderPipelineError:
             try:
                 subtitle_lines = _timings_from_offline_whisper(
@@ -563,6 +751,10 @@ def build_voiceover_and_subtitles(
             {"text": row.text, "start": row.start, "end": row.end} for row in sentence_timings
         ],
     }
+    if word_timings:
+        manifest_payload["word_timings"] = [
+            {"word": row.word, "start": row.start, "end": row.end} for row in word_timings
+        ]
     try:
         import json
 

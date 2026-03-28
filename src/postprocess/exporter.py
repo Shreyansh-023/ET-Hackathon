@@ -84,6 +84,38 @@ def _resolve_intermediate_video(job_dir: Path) -> Path:
     raise ValidationPipelineError("No intermediate render output found. Run render stage first.")
 
 
+def _normalize_input_video(
+    input_video: Path,
+    *,
+    job_dir: Path,
+    fps: int,
+    force: bool,
+) -> Path:
+    """Normalize input video to a stable CFR stream for export compositing."""
+    normalized_path = job_dir / "renders" / "intermediate_normalized.mp4"
+    if normalized_path.exists() and not force:
+        return normalized_path
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(input_video),
+        "-vf",
+        f"fps={fps},format=yuv420p",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        os.getenv("FFMPEG_PRESET", "medium"),
+        "-crf",
+        os.getenv("FFMPEG_CRF", "22"),
+        str(normalized_path),
+    ]
+    _run_command(cmd, cwd=job_dir)
+    return normalized_path
+
+
 def _parse_srt(srt_path: Path) -> list[dict]:
     """Parse an SRT file into a list of {start, end, text} dicts (times in seconds)."""
     content = srt_path.read_text(encoding="utf-8")
@@ -242,14 +274,36 @@ def _has_subtitle_filter() -> bool:
 MAX_DRAWTEXT_SUBTITLE_CUES = 40
 
 
-def _find_project_asset(patterns: list[str], keywords: list[str]) -> Path | None:
-    """Find a file in the project root matching patterns and keywords."""
+def _asset_search_roots() -> list[Path]:
     project_root = Path(__file__).resolve().parent.parent.parent
-    for pattern in patterns:
-        for candidate in project_root.glob(pattern):
-            name_lower = candidate.name.lower()
-            if any(kw in name_lower for kw in keywords):
-                return candidate
+    return [
+        project_root,
+        project_root / "assets",
+        project_root / "assets" / "branding",
+        project_root / "branding",
+    ]
+
+
+def _resolve_override_path(env_var: str) -> Path | None:
+    raw = os.getenv(env_var, "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = _project_root() / raw
+    return candidate if candidate.exists() else None
+
+
+def _find_project_asset(patterns: list[str], keywords: list[str]) -> Path | None:
+    """Find a file in project roots matching patterns and keywords."""
+    for root in _asset_search_roots():
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            for candidate in root.glob(pattern):
+                name_lower = candidate.name.lower()
+                if any(kw in name_lower for kw in keywords):
+                    return candidate
     return None
 
 
@@ -268,6 +322,9 @@ def _find_background_video() -> Path | None:
 
 
 def _find_et_logo() -> Path | None:
+    override = _resolve_override_path("ET_LOGO_PATH")
+    if override is not None:
+        return override
     return _find_project_asset(
         ["ET Logo.*", "et logo.*", "ET_Logo.*", "et_logo.*"],
         ["et", "logo"],
@@ -275,6 +332,9 @@ def _find_et_logo() -> Path | None:
 
 
 def _find_header_image() -> Path | None:
+    override = _resolve_override_path("HEADER_IMAGE_PATH")
+    if override is not None:
+        return override
     return _find_project_asset(
         ["Main header.*", "main header.*", "Main_header.*", "header.*"],
         ["header"],
@@ -331,6 +391,7 @@ def _render_final(
     *,
     job_dir: Path,
     input_video: Path,
+    audio_path: Path | None,
     subtitles_path: Path | None,
     burn_subtitles: bool,
 ) -> Path:
@@ -341,7 +402,11 @@ def _render_final(
     header_img = _find_header_image()
     et_logo = _find_et_logo()
     headline = _read_headline(job_dir)
-    target_duration = _probe_duration_seconds(input_video, cwd=job_dir)
+    if audio_path and audio_path.exists():
+        target_duration = _probe_duration_seconds(audio_path, cwd=job_dir)
+    else:
+        target_duration = _probe_duration_seconds(input_video, cwd=job_dir)
+    render_fps = max(1, int(os.getenv("RENDER_FPS", "30")))
     drawtext_fontfile = _resolve_drawtext_fontfile()
     drawtext_font_part = ""
     if drawtext_fontfile is not None:
@@ -353,29 +418,41 @@ def _render_final(
     # Input 0: pipeline video
     cmd.extend(["-i", str(input_video)])
 
+    # Input 1: narration audio (optional)
+    input_audio_idx = None
+    next_idx = 1
+    if audio_path and audio_path.exists():
+        input_audio_idx = next_idx
+        cmd.extend(["-i", str(audio_path)])
+        next_idx += 1
+
     # Input 1: background video (looped, no audio)
     input_bg_idx = None
     if bg_video:
-        input_bg_idx = 1
+        input_bg_idx = next_idx
         cmd.extend(["-stream_loop", "-1", "-i", str(bg_video)])
+        next_idx += 1
 
     # Input 2: header image
     input_header_idx = None
     if header_img:
-        input_header_idx = (input_bg_idx or 0) + 1
+        input_header_idx = next_idx
         cmd.extend(["-i", str(header_img)])
+        next_idx += 1
 
     # Input 3: background music
     input_music_idx = None
     if bg_music:
-        input_music_idx = (input_header_idx or input_bg_idx or 0) + 1
+        input_music_idx = next_idx
         cmd.extend(["-i", str(bg_music)])
+        next_idx += 1
 
     # Input 4: ET logo
     input_logo_idx = None
     if et_logo:
-        input_logo_idx = (input_music_idx or input_header_idx or input_bg_idx or 0) + 1
+        input_logo_idx = next_idx
         cmd.extend(["-i", str(et_logo)])
+        next_idx += 1
 
     # --- Build filter_complex ---
     filters = []
@@ -421,21 +498,21 @@ def _render_final(
             if target_duration is not None and target_duration > 0:
                 filters.append(
                     f"[{input_bg_idx}:v]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
-                    f"crop={canvas_w}:{canvas_h},setsar=1,"
+                    f"crop={canvas_w}:{canvas_h},fps={render_fps},setsar=1,"
                     f"tpad=stop_mode=clone:stop_duration={target_duration:.3f}[bg_scaled]"
                 )
             else:
                 filters.append(
                     f"[{input_bg_idx}:v]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
-                    f"crop={canvas_w}:{canvas_h},setsar=1[bg_scaled]"
+                    f"crop={canvas_w}:{canvas_h},fps={render_fps},setsar=1[bg_scaled]"
                 )
         else:
-            filters.append(f"color=c=black:s={canvas_w}x{canvas_h}:r=30[bg_scaled]")
+            filters.append(f"color=c=black:s={canvas_w}x{canvas_h}:r={render_fps}[bg_scaled]")
 
         # 2. Crop pipeline video to square (center crop) then scale to canvas width
         filters.append(
             f"[0:v]crop=ih:ih:(iw-ih)/2:0,"
-            f"scale={canvas_w}:{pipeline_h},setsar=1[pipeline_scaled]"
+            f"scale={canvas_w}:{pipeline_h},fps={render_fps},setsar=1[pipeline_scaled]"
         )
 
         # 3. Header image
@@ -610,8 +687,9 @@ def _render_final(
 
         # 9. Audio: mix narration + background music (increased bg volume)
         audio_out_tag = "aout"
+        narration_idx = input_audio_idx if input_audio_idx is not None else 0
         if bg_music:
-            filters.append(f"[0:a]volume=1.0[narration]")
+            filters.append(f"[{narration_idx}:a]volume=1.0[narration]")
             filters.append(
                 f"[{input_music_idx}:a]volume=0.40,"
                 f"afade=t=in:st=0:d=2,afade=t=out:st=0:d=3[bgm]"
@@ -621,7 +699,7 @@ def _render_final(
                 f"loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
             )
         else:
-            filters.append(f"[0:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
+            filters.append(f"[{narration_idx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
 
         if target_duration is not None and target_duration > 0:
             filters.append(
@@ -673,57 +751,6 @@ def _render_final(
         ]
     )
     _run_command(cmd, cwd=job_dir)
-    return final_path
-
-
-def _apply_final_playback_speed(*, job_dir: Path, final_path: Path) -> Path:
-    """Apply a global playback speed adjustment to the final video.
-
-    FINAL_PLAYBACK_SPEED controls tempo where:
-    - 1.0 = unchanged
-    - 0.95 = ~5% slower
-    - 1.05 = ~5% faster
-    """
-    raw_speed = os.getenv("FINAL_PLAYBACK_SPEED", "0.95").strip()
-    try:
-        speed = float(raw_speed)
-    except ValueError as exc:
-        raise RenderPipelineError(f"Invalid FINAL_PLAYBACK_SPEED value: {raw_speed}") from exc
-
-    if speed <= 0:
-        raise RenderPipelineError("FINAL_PLAYBACK_SPEED must be greater than 0")
-    if abs(speed - 1.0) < 1e-9:
-        return final_path
-    if speed < 0.5 or speed > 2.0:
-        raise RenderPipelineError("FINAL_PLAYBACK_SPEED must be between 0.5 and 2.0")
-
-    video_pts_factor = 1.0 / speed
-    temp_path = final_path.with_name(f"{final_path.stem}.speed_tmp{final_path.suffix}")
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(final_path),
-        "-filter:v",
-        f"setpts={video_pts_factor:.9f}*PTS",
-        "-filter:a",
-        f"atempo={speed:.9f}",
-        "-c:v",
-        "libx264",
-        "-preset",
-        os.getenv("FFMPEG_PRESET", "medium"),
-        "-crf",
-        os.getenv("FFMPEG_CRF", "22"),
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-movflags",
-        "+faststart",
-        str(temp_path),
-    ]
-    _run_command(cmd, cwd=job_dir)
-    temp_path.replace(final_path)
     return final_path
 
 
@@ -793,6 +820,36 @@ def build_export_package(
     warnings: list[str] = []
     failures: list[str] = []
     subtitles_path = job_dir / "audio" / "subtitles.srt"
+    header_override_raw = os.getenv("HEADER_IMAGE_PATH", "").strip()
+    logo_override_raw = os.getenv("ET_LOGO_PATH", "").strip()
+    header_override = _resolve_override_path("HEADER_IMAGE_PATH") if header_override_raw else None
+    logo_override = _resolve_override_path("ET_LOGO_PATH") if logo_override_raw else None
+    header_img = _find_header_image()
+    et_logo = _find_et_logo()
+    bg_video = _find_background_video()
+    bg_music = _find_background_music()
+
+    if header_override_raw and header_override is None:
+        warnings.append(f"HEADER_IMAGE_PATH set but not found: {header_override_raw}")
+    if logo_override_raw and logo_override is None:
+        warnings.append(f"ET_LOGO_PATH set but not found: {logo_override_raw}")
+    if header_img is None:
+        warnings.append("Header image not found; ET header overlay disabled")
+    if et_logo is None:
+        warnings.append("ET logo not found; watermark disabled")
+
+    branding_diagnostics = {
+        "header_image": str(header_img) if header_img else "",
+        "header_source": "override"
+        if header_override is not None
+        else ("auto" if header_img else "missing"),
+        "header_override": header_override_raw,
+        "logo_image": str(et_logo) if et_logo else "",
+        "logo_source": "override" if logo_override is not None else ("auto" if et_logo else "missing"),
+        "logo_override": logo_override_raw,
+        "background_video": str(bg_video) if bg_video else "",
+        "background_music": str(bg_music) if bg_music else "",
+    }
     burn_subtitles_raw = os.getenv("BURN_SUBTITLES", "auto").strip().lower() or "auto"
     if burn_subtitles_raw in {"0", "false", "no", "off"}:
         burn_subtitles = False
@@ -801,20 +858,43 @@ def build_export_package(
     else:
         burn_subtitles = subtitles_path.exists()
 
+    final_rendered = False
+    preview_rendered = False
+    thumbnail_rendered = False
+
     try:
         if force or not final_path.exists():
-            input_video = _resolve_intermediate_video(job_dir)
+            voiceover_path = job_dir / "audio" / "voiceover.wav"
+            audio_path = voiceover_path if voiceover_path.exists() else None
+            if audio_path is None:
+                warnings.append("Voiceover audio not found; using intermediate audio track")
+
+            render_fps = max(1, int(os.getenv("RENDER_FPS", "30")))
+            if audio_path is not None:
+                raw_path = job_dir / "renders" / "intermediate_raw.mp4"
+                base_video = raw_path if raw_path.exists() else _resolve_intermediate_video(job_dir)
+                input_video = _normalize_input_video(
+                    base_video,
+                    job_dir=job_dir,
+                    fps=render_fps,
+                    force=force,
+                )
+            else:
+                input_video = _resolve_intermediate_video(job_dir)
             final_path = _render_final(
                 job_dir=job_dir,
                 input_video=input_video,
+                audio_path=audio_path,
                 subtitles_path=subtitles_path,
                 burn_subtitles=burn_subtitles,
             )
-            final_path = _apply_final_playback_speed(job_dir=job_dir, final_path=final_path)
+            final_rendered = True
         if force or not preview_path.exists():
             preview_path = _render_preview(job_dir=job_dir, final_path=final_path)
+            preview_rendered = True
         if force or not thumbnail_path.exists():
             thumbnail_path = _render_thumbnail(job_dir=job_dir, final_path=final_path)
+            thumbnail_rendered = True
     except RenderPipelineError as exc:
         failures.append(str(exc))
         report = {
@@ -849,6 +929,13 @@ def build_export_package(
             "video_codec": "libx264",
             "audio_codec": "aac",
         },
+        "export_actions": {
+            "force": force,
+            "final_rendered": final_rendered,
+            "preview_rendered": preview_rendered,
+            "thumbnail_rendered": thumbnail_rendered,
+        },
+        "branding_assets": branding_diagnostics,
         "durations": {
             "final_seconds": final_duration,
         },

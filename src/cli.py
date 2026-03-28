@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 
 from src.assets.pipeline import build_assets_step
+from src.audio.pipeline import build_voiceover_and_subtitles
 from src.common.config import load_config
 from src.common.errors import PipelineError, RenderPipelineError, ValidationPipelineError
 from src.common.models import Article, Asset, Scene
@@ -132,7 +133,7 @@ def assets(
     job_id: str = typer.Argument(..., help="Job id created by ingest stage."),
     dry_run: bool = typer.Option(False, help="Run without paid provider calls."),
 ) -> None:
-    """Step 3: resolve visuals with provider fallbacks, then build voiceover + subtitles."""
+    """Step 3: resolve visuals with provider fallbacks."""
     cfg = load_config()
     repo = JobRepository(cfg.jobs_root)
 
@@ -149,6 +150,7 @@ def assets(
             job_dir,
             article_language=article.language,
             dry_run=dry_run,
+            include_audio=False,
             logger=logger,
         )
         built_assets = step3.assets
@@ -162,10 +164,6 @@ def assets(
         repo.add_artifact(job_id, "visual_plan", "assets/visual_plan.json")
         repo.add_artifact(job_id, "visual_plan_prompt", "assets/visual_plan_prompt.txt")
         repo.add_artifact(job_id, "visual_plan_output_raw", "assets/visual_plan_output_raw.txt")
-        repo.add_artifact(job_id, "voiceover", step3.audio.voiceover_rel_path)
-        repo.add_artifact(job_id, "subtitles_srt", step3.audio.subtitles_srt_rel_path)
-        repo.add_artifact(job_id, "subtitles_vtt", step3.audio.subtitles_vtt_rel_path)
-        repo.add_artifact(job_id, "audio_manifest", step3.audio.audio_manifest_rel_path)
         return built_assets
 
     try:
@@ -173,6 +171,51 @@ def assets(
         console.print(f"[green]Assets complete[/green] job_id={job_id} dry_run={dry_run}")
     except PipelineError as exc:
         console.print(f"[red]Assets failed:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def audio(
+    job_id: str = typer.Argument(..., help="Job id created by ingest stage."),
+    dry_run: bool = typer.Option(False, help="Run without paid provider calls."),
+) -> None:
+    """Step 4: build voiceover + subtitles."""
+    cfg = load_config()
+    repo = JobRepository(cfg.jobs_root)
+
+    def _work() -> dict[str, str]:
+        job_dir = repo.job_path(job_id)
+        article_payload = _read_json(job_dir / "parsed" / "article.json")
+        article = validate_payload(Article, article_payload)
+        scenes_payload = _read_json(job_dir / "storyboard" / "scenes.json")
+        scenes = [validate_payload(Scene, row) for row in scenes_payload]
+        logger = repo.get_stage_logger(job_id, "audio")
+
+        audio_result = build_voiceover_and_subtitles(
+            scenes,
+            cfg,
+            job_dir,
+            article_language=article.language,
+            dry_run=dry_run,
+            logger=logger,
+        )
+
+        repo.add_artifact(job_id, "voiceover", audio_result.voiceover_rel_path)
+        repo.add_artifact(job_id, "subtitles_srt", audio_result.subtitles_srt_rel_path)
+        repo.add_artifact(job_id, "subtitles_vtt", audio_result.subtitles_vtt_rel_path)
+        repo.add_artifact(job_id, "audio_manifest", audio_result.audio_manifest_rel_path)
+        return {
+            "voiceover": audio_result.voiceover_rel_path,
+            "subtitles_srt": audio_result.subtitles_srt_rel_path,
+            "subtitles_vtt": audio_result.subtitles_vtt_rel_path,
+            "audio_manifest": audio_result.audio_manifest_rel_path,
+        }
+
+    try:
+        _run_stage(repo, job_id, "audio", cfg.retry_limits.get("audio", 0), _work)
+        console.print(f"[green]Audio complete[/green] job_id={job_id} dry_run={dry_run}")
+    except PipelineError as exc:
+        console.print(f"[red]Audio failed:[/red] {exc}")
         raise typer.Exit(code=1)
 
 

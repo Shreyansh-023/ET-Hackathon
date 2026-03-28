@@ -155,6 +155,68 @@ def _choose_template_name(scene: Scene) -> str:
     return SCENE_TEMPLATES["image_text_split"]
 
 
+def _count_narration_words(text: str) -> int:
+    words = [token for token in text.replace("\n", " ").split() if token]
+    return len(words)
+
+
+def _scene_duration_weights(scenes: list[Scene]) -> list[int]:
+    weights: list[int] = []
+    for scene in scenes:
+        count = _count_narration_words(scene.narration)
+        weights.append(max(1, count))
+    return weights
+
+
+def _allocate_scene_durations(
+    usable_seconds: float,
+    weights: list[int],
+    *,
+    fps: int,
+    min_scene_seconds: float,
+) -> list[float]:
+    count = len(weights)
+    if count == 0:
+        return []
+
+    min_scene = max(min_scene_seconds, 1.0 / fps)
+    if usable_seconds <= 0:
+        return [min_scene] * count
+
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        weights = [1] * count
+        total_weight = count
+
+    if usable_seconds < min_scene * count:
+        min_scene = max(1.0 / fps, usable_seconds / count)
+
+    raw = [usable_seconds * weight / total_weight for weight in weights]
+    fixed_indices = [idx for idx, value in enumerate(raw) if value < min_scene]
+
+    if not fixed_indices:
+        return raw
+
+    remaining_time = usable_seconds - min_scene * len(fixed_indices)
+    if remaining_time <= 0:
+        return [min_scene] * count
+
+    remaining_weight = sum(
+        weight for idx, weight in enumerate(weights) if idx not in fixed_indices
+    )
+    if remaining_weight <= 0:
+        return [min_scene] * count
+
+    durations = [0.0] * count
+    for idx in fixed_indices:
+        durations[idx] = min_scene
+    for idx, weight in enumerate(weights):
+        if idx in fixed_indices:
+            continue
+        durations[idx] = remaining_time * weight / remaining_weight
+    return durations
+
+
 def _build_scene_manifest(
     job_id: str,
     scenes: list[Scene],
@@ -163,11 +225,14 @@ def _build_scene_manifest(
     job_dir: Path,
     fps: int,
     target_scene_duration_seconds: float | None = None,
+    base_durations: list[float] | None = None,
+    timing_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
 
-    base_durations = [max(1.0 / fps, scene.end - scene.start) for scene in scenes]
+    if base_durations is None or len(base_durations) != len(scenes):
+        base_durations = [max(1.0 / fps, scene.end - scene.start) for scene in scenes]
     planned_scene_total_seconds = sum(base_durations)
     duration_scale = 1.0
     if target_scene_duration_seconds is not None and planned_scene_total_seconds > 0:
@@ -216,19 +281,23 @@ def _build_scene_manifest(
             }
         )
 
+    timing_policy: dict[str, Any] = {
+        "planned_scene_seconds": round(planned_scene_total_seconds, 3),
+        "target_scene_seconds": round(target_scene_duration_seconds, 3)
+        if target_scene_duration_seconds is not None
+        else None,
+        "duration_scale": round(duration_scale, 5),
+    }
+    if timing_meta:
+        timing_policy.update(timing_meta)
+
     return {
         "job_id": job_id,
         "fps": fps,
         "scene_count": len(rows),
         "templates": list(SCENE_TEMPLATES.values()),
         "scenes": rows,
-        "timing_policy": {
-            "planned_scene_seconds": round(planned_scene_total_seconds, 3),
-            "target_scene_seconds": round(target_scene_duration_seconds, 3)
-            if target_scene_duration_seconds is not None
-            else None,
-            "duration_scale": round(duration_scale, 5),
-        },
+        "timing_policy": timing_policy,
         "warnings": warnings,
     }
 
@@ -657,9 +726,56 @@ def build_render_stage(job_id: str, cfg: PipelineConfig, *, job_dir: Path, logge
         transition_frames = int(os.getenv("RED_TRANSITION_FRAMES", "12"))
         transition_seconds_total = max(0, len(scenes) - 1) * (transition_frames / float(fps))
         voiceover_duration = _probe_duration_seconds(job_dir / "audio" / "voiceover.wav", cwd=job_dir)
+
+        base_durations: list[float] | None = None
         target_scene_duration_seconds: float | None = None
+        timing_meta: dict[str, Any] = {
+            "transition_seconds_total": round(transition_seconds_total, 3),
+        }
+
         if voiceover_duration is not None and voiceover_duration > 0:
-            target_scene_duration_seconds = max(1.0 / fps, voiceover_duration - transition_seconds_total)
+            usable_scene_seconds = max(0.0, voiceover_duration - transition_seconds_total)
+            raw_min_scene = os.getenv("MIN_SCENE_SECONDS", "2.0").strip()
+            try:
+                min_scene_seconds = max(0.1, float(raw_min_scene))
+            except ValueError:
+                min_scene_seconds = 2.0
+
+            if usable_scene_seconds > 0:
+                weights = _scene_duration_weights(scenes)
+                base_durations = _allocate_scene_durations(
+                    usable_scene_seconds,
+                    weights,
+                    fps=fps,
+                    min_scene_seconds=min_scene_seconds,
+                )
+                target_scene_duration_seconds = usable_scene_seconds
+                timing_meta.update(
+                    {
+                        "duration_source": "narration_word_count",
+                        "voiceover_seconds": round(voiceover_duration, 3),
+                        "usable_scene_seconds": round(usable_scene_seconds, 3),
+                        "min_scene_seconds": round(min_scene_seconds, 3),
+                        "duration_weights": weights,
+                    }
+                )
+            else:
+                timing_meta.update(
+                    {
+                        "duration_source": "storyboard_plan",
+                        "voiceover_seconds": round(voiceover_duration, 3),
+                        "usable_scene_seconds": round(usable_scene_seconds, 3),
+                    }
+                )
+        else:
+            timing_meta.update(
+                {
+                    "duration_source": "storyboard_plan",
+                    "voiceover_seconds": round(voiceover_duration, 3)
+                    if voiceover_duration is not None
+                    else None,
+                }
+            )
 
         manifest = _build_scene_manifest(
             job_id,
@@ -668,6 +784,8 @@ def build_render_stage(job_id: str, cfg: PipelineConfig, *, job_dir: Path, logge
             job_dir=job_dir,
             fps=fps,
             target_scene_duration_seconds=target_scene_duration_seconds,
+            base_durations=base_durations,
+            timing_meta=timing_meta,
         )
 
         manifest_path = job_dir / "renders" / "scene_manifest.json"

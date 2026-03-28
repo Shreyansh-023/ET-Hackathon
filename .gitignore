@@ -1,7 +1,14 @@
 .venv/
 venv/
 __pycache__/
+node_modules/
 *.pyc
 .env
 jobs/
 .cache/
+web/node_modules
+web/.next/
+web/out/
+web/.vercel/
+web/.env
+web/.env*.local

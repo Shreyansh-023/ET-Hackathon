@@ -44,6 +44,7 @@ def run_pipeline(file_or_url: str, *, title: str = "", dry_run: bool = False) ->
 
     _run_stage(runner, ["plan", job_id, *shared_flags], "plan")
     _run_stage(runner, ["assets", job_id, *shared_flags], "assets")
+    _run_stage(runner, ["audio", job_id, *shared_flags], "audio")
     _run_stage(runner, ["render", job_id, *shared_flags], "render")
     _run_stage(runner, ["export", job_id, *shared_flags], "export")
 
