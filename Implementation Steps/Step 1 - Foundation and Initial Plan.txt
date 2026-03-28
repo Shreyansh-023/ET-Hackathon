@@ -13,6 +13,7 @@ How To Do (Implementation)
 2) Ask user for secrets and save them in environment variables (never hardcode keys)
 - Create .env file and keep only placeholders first:
   - NVIDIA_API_KEY=
+  - SERP_API_KEY=
   - PEXELS_API_KEY=
   - REPLICATE_API_TOKEN=
   - GROQ_API_KEY=

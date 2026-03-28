@@ -20,17 +20,22 @@ for scene_id in [f"scene-{i:03d}" for i in range(1, 7)]:
             "asset_id": f"asset-{scene_id}",
             "llm_plan": visual_plan["scene_plan"].get(scene_id, {}),
             "path": f"assets/images/{scene_id}.jpg",
-            "provenance": {"provider": "pexels", "status": "resolved"},
+            "provenance": {"provider": "serpapi", "status": "resolved"},
             "scene_id": scene_id,
-            "source": "pexels",
+            "source": "serpapi",
         })
         scene_count += 1
+
+stock_queries = visual_plan.get("stock_queries", visual_plan.get("pexels_queries", []))
 
 # Write assets registry
 registry = {
     "assets": registry_items,
-    "pexels_query_count": len(visual_plan.get("pexels_queries", [])),
-    "pexels_queries": visual_plan.get("pexels_queries", []),
+    "stock_query_count": len(stock_queries),
+    "stock_queries": stock_queries,
+    # Keep legacy aliases for older tooling.
+    "pexels_query_count": len(stock_queries),
+    "pexels_queries": stock_queries,
     "pool_size": 5,
     "scene_count": scene_count,
     "subtitles": {
@@ -39,7 +44,9 @@ registry = {
     },
     "visual_plan": {
         "notes": visual_plan.get("notes"),
-        "pexels_query_count": len(visual_plan.get("pexels_queries", [])),
+        "stock_query_count": len(stock_queries),
+        # Keep legacy alias.
+        "pexels_query_count": len(stock_queries),
     },
     "voiceover": {
         "duration_seconds": 77.72,

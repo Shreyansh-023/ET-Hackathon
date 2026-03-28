@@ -14,12 +14,14 @@ How To Do (Implementation)
 - Load storyboard scenes from /jobs/{job_id}/storyboard/storyboard.json.
 - For each scene, read visual_strategy and narration.
 
-2) Implement stock image retrieval with Pexels
-- Read PEXELS_API_KEY from environment.
-- Call GET https://api.pexels.com/v1/search with:
+2) Implement stock image retrieval with SerpApi Google Images Light + Pexels backup
+- Read SERP_API_KEY from environment.
+- Read PEXELS_API_KEY from environment for fallback.
+- Call GET https://serpapi.com/search.json with:
+  - engine=google_images_light
   - query from scene entities + visual hooks
-  - per_page small first (for example 5)
-  - orientation portrait for 9:16 by default
+  - parse images_results and keep direct image URLs
+- If SerpApi query returns low-confidence or unusable candidates, call Pexels search as backup for that query.
 - Rank candidates by relevance to scene keywords, image clarity, and orientation fit.
 - Save selected image and metadata in assets registry.
 
@@ -91,7 +93,7 @@ How To Do (Implementation)
 - subtitles.vtt
 
 8) Failure and retry logic
-- For Pexels and Replicate calls, retry with backoff on transient HTTP failures.
+- For SerpApi, Pexels, and Replicate calls, retry with backoff on transient HTTP failures.
 - If all providers fail, create text-motion fallback asset entry and continue pipeline.
 
 9) Security and implementation note

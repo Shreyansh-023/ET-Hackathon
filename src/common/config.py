@@ -24,6 +24,7 @@ class PipelineConfig:
     pexels_api_key: str
     replicate_api_token: str
     clip_drop_api_key: str
+    serpapi_api_key: str
     nvidia_riva_api_key: str
     nvidia_riva_function_id: str
     nvidia_riva_uri: str
@@ -63,13 +64,14 @@ def load_config() -> PipelineConfig:
         nvidia_api_key=_env("NVIDIA_API_KEY"),
         gemini_api_key=_env("GEMINI_API_KEY"),
         gemini_visual_api_key=_env("GEMINI_VISUAL_API_KEY"),
-        gemini_model=_env("GEMINI_MODEL", "gemini-2.5-flash"),
+        gemini_model=_env("GEMINI_MODEL", "gemini-2.5-flash-lite"),
         groq_api_key=_env("GROQ_API_KEY"),
         groq_base_url=_env("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
         groq_model=_env("GROQ_MODEL", "openai/gpt-oss-20b"),
         pexels_api_key=_env("PEXELS_API_KEY"),
         replicate_api_token=_env("REPLICATE_API_TOKEN"),
         clip_drop_api_key=_env("CLIP_DROP_API"),
+        serpapi_api_key=_env("SERP_API_KEY"),
         nvidia_riva_api_key=_env("NVIDIA_RIVA_API_KEY"),
         nvidia_riva_function_id=_env("NVIDIA_RIVA_FUNCTION_ID", "877104f7-e885-42b9-8de8-f6e4c6303969"),
         nvidia_riva_uri=_env("NVIDIA_RIVA_URI", "grpc.nvcf.nvidia.com:443"),

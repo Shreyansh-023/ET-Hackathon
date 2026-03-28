@@ -288,7 +288,7 @@ def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, An
         "Your job is to generate highly specific, detailed image search queries and AI image generation prompts "
         "for each scene so that the visuals closely match what a real TV news broadcast would show.\n\n"
         "CRITICAL: ALL your output MUST be in ENGLISH only. "
-        "All pexels_search_queries must be in English. All replicate_prompt must be in English. "
+        "All stock_search_queries must be in English. All replicate_prompt must be in English. "
         "All description fields must be in English. Even if the input narration is in Hindi or another language, "
         "you must write everything in English.\n\n"
         "Return ONLY a JSON array with one object per scene. Each object must have this schema:\n"
@@ -296,12 +296,12 @@ def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, An
         '  "id": "scene-001",\n'
         '  "visual_type": "photo|graph|chart|map",\n'
         '  "description": "A detailed description of the ideal visual for this scene.",\n'
-        '  "image_source": "pexels|replicate",\n'
-        '  "pexels_search_queries": ["query1", "query2", "query3"],\n'
+        '  "image_source": "serpapi|replicate",\n'
+        '  "stock_search_queries": ["query1", "query2", "query3"],\n'
         '  "replicate_prompt": "Detailed AI image generation prompt"\n'
         "}\n\n"
-        "Guidelines for image_source — deciding between pexels (stock photos) and replicate (AI generation):\n"
-        "- Use 'pexels' when the scene depicts something very common, recognizable, or real-world that stock "
+        "Guidelines for image_source — deciding between serpapi (Google Images stock search) and replicate (AI generation):\n"
+        "- Use 'serpapi' when the scene depicts something very common, recognizable, or real-world that stock "
         "photo sites will have good results for. Examples: famous landmarks (Taj Mahal, Eiffel Tower), "
         "world leaders (Trump, Modi, Putin), country maps/flags, generic cityscapes, offices, stock markets, "
         "courtrooms, military vehicles, press conferences, parliaments, well-known buildings.\n"
@@ -314,23 +314,25 @@ def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, An
         "countries\\'s flags with a cracked border between them'.\n"
         "  4. Maps, graphs, charts, infographics, data visualizations.\n"
         "- IMPORTANT: At least ONE scene in every video MUST use 'replicate'. If all scenes seem best suited "
-        "for pexels, pick the most abstract/conceptual scene and assign it to replicate.\n"
-        "- Always provide BOTH pexels_search_queries AND replicate_prompt for every scene regardless of "
+        "for serpapi, pick the most abstract/conceptual scene and assign it to replicate.\n"
+        "- Always provide BOTH stock_search_queries AND replicate_prompt for every scene regardless of "
         "image_source — this allows fallback if the primary source fails.\n\n"
-        "Guidelines for pexels_search_queries:\n"
+        "Guidelines for stock_search_queries:\n"
         "- Provide exactly 3 queries per scene.\n"
-        "- Be VERY specific and descriptive — generic queries like 'politics' or 'war' are not allowed.\n"
-        "- Each query must contain concrete entities from the scene: person name, place, institution, object, or event context.\n"
+        "- Be VERY specific  — generic queries like 'politics' or 'war' are allowed.\n"
+        "- Each query must contain concrete entities from the scene: person name, place, institution, object.\n"
         "- Include real names, locations, and objects mentioned in the narration (e.g. 'Strait of Hormuz aerial view', 'White House press briefing room', 'Iranian parliament building exterior').\n"
-        "- Each query should approach the visual from a different editorial angle (e.g. wide establishing shot, close-up detail, context shot).\n"
+        "-Dont use queries like 'India energy security challenge','India oil import dependency map'.\n"
+        "-Be very specific you are searching for the longer is the query higher chance is that no image can be found for it got it, use maximum 3 word query not longer than that"       
         "- Use search-ready keyword phrasing (4-10 words), avoid full sentences, avoid metaphorical wording.\n"
-        "- If a specific person/place is central to the scene, include that exact name in at least one query.\n"
+        "- If a specific person/place is central to the scene, include that exact name .\n"
         "- Think about what a news editor would actually search for to illustrate this exact sentence.\n"
         "- Avoid abstract or metaphorical queries — use concrete, searchable terms.\n\n"
         "Guidelines for visual_type:\n"
         "- Use 'photo' for most scenes — stock photos are the default.\n"
         "- Use 'map' ONLY when the narration explicitly references a geographic location that benefits from a map view.\n"
         "- Use 'graph' or 'chart' ONLY when the narration includes specific data, numbers, or statistics.\n\n"
+        "-- Some example: instead of giving a vague stock query like (states under code of conduct India), say (state of India map), and instead of (energy sector growth India), use something specific like (power plant photo).\n\n"
         "Guidelines for replicate_prompt (AI-generated images):\n"
         "- ALWAYS provide a detailed prompt for every scene (never leave empty).\n"
         "- Prompt depth requirement: write 80-180 words with rich scene detail and production intent.\n"
@@ -346,7 +348,7 @@ def _build_gemini_visual_prompt(article: Article, scenes_json: list[dict[str, An
         "- For graphs/charts/data: describe data points, axis labels, use red and yellow for chart colors, news-graphic style.\n"
         "- For abstract/conceptual scenes: describe the composition with red/yellow accents, high contrast, news broadcast feel.\n"
         "- For photo-type scenes: still provide a detailed prompt describing the ideal image as a fallback.\n\n"
-        "- Some example instead of giving pexels query as (states under code of conduct India) say (state of india) , instead of (energy sector growth India) say something specifi for which finding photo is easier and specifi like (power plant photo)\n\n"
+       
         f"Article Title: {article.title or 'Untitled'}\n"
         f"Article Text:\n{article.clean_article_text}\n\n"
         f"Scene Script:\n{scenes_text}"
@@ -393,11 +395,25 @@ def _merge_visual_suggestions(
     for row in scene_rows:
         scene_id = row.get("id") or row.get("scene_id")
         visual = visual_by_id.get(scene_id, {})
+
+        image_source = str(visual.get("image_source", "serpapi") or "serpapi").strip().lower()
+        if image_source == "cygnusx1":
+            image_source = "serpapi"
+        if image_source not in {"replicate", "serpapi"}:
+            image_source = "serpapi"
+
+        stock_queries = visual.get("stock_search_queries")
+        if not isinstance(stock_queries, list):
+            legacy_queries = visual.get("pexels_search_queries", [])
+            stock_queries = legacy_queries if isinstance(legacy_queries, list) else []
+
         row["visual_suggestions"] = {
             "type": visual.get("visual_type", "photo"),
             "description": visual.get("description", "Editorial news visual"),
-            "image_source": visual.get("image_source", "pexels"),
-            "pexels_search_queries": visual.get("pexels_search_queries", []),
+            "image_source": image_source,
+            "stock_search_queries": stock_queries,
+            # Keep legacy key for compatibility with existing storyboard artifacts.
+            "pexels_search_queries": stock_queries,
             "replicate_prompt": visual.get("replicate_prompt", ""),
         }
     return scene_rows
