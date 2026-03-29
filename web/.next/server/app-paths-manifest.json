@@ -1,5 +1,3 @@
 {
-  "/page": "app/page.js",
-  "/api/jobs/[jobId]/artifact/route": "app/api/jobs/[jobId]/artifact/route.js",
-  "/api/jobs/[jobId]/route": "app/api/jobs/[jobId]/route.js"
+  "/page": "app/page.js"
 }
