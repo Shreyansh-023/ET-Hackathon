@@ -13,6 +13,7 @@ function readArg(name) {
 const jobId = readArg("--job-id");
 const pythonBin = readArg("--python") || "python";
 const repoRoot = readArg("--repo-root") || path.resolve(process.cwd(), "..");
+const dryRun = process.argv.includes("--dry-run");
 
 if (!jobId) {
   process.exit(1);
@@ -31,10 +32,19 @@ function logLine(message) {
 const stages = ["plan", "assets", "audio", "render", "export"];
 for (const stage of stages) {
   logLine(`stage_start ${stage}`);
+  const args = ["-m", "src.cli", stage, jobId];
+  if (dryRun) {
+    args.push("--dry-run");
+  }
   const result = spawnSync(
     pythonBin,
-    ["-m", "src.cli", stage, jobId],
-    { cwd: repoRoot, env: process.env, encoding: "utf-8" }
+    args,
+    {
+      cwd: repoRoot,
+      env: process.env,
+      encoding: "utf-8",
+      windowsHide: true
+    }
   );
 
   if (result.stdout) {

@@ -221,6 +221,15 @@ body {
   background: #000;
 }
 
+/* Keep portrait framing visible in fullscreen instead of cropping. */
+.reel-frame video:fullscreen,
+.reel-frame video:-webkit-full-screen {
+  object-fit: contain;
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+}
+
 .reel-placeholder {
   text-align: center;
   color: #c9d1d9;
@@ -401,6 +410,7 @@ button:disabled {
     opacity: 0;
     transform: translateY(14px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);

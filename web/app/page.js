@@ -12,6 +12,19 @@ const STAGE_LABELS = {
   export: "Export"
 };
 
+async function parseJsonSafely(response) {
+  const raw = await response.text();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    return { error: raw.slice(0, 200) };
+  }
+}
+
 function formatLanguage(language) {
   if (!language) {
     return "Unknown";
@@ -35,10 +48,10 @@ export default function Home() {
     const loadStatus = async () => {
       try {
         const response = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" });
+        const payload = await parseJsonSafely(response);
         if (!response.ok) {
-          throw new Error("Status fetch failed");
+          throw new Error(payload?.error || "Status fetch failed");
         }
-        const payload = await response.json();
         if (active) {
           setStatus(payload);
           setError("");
@@ -93,7 +106,7 @@ export default function Home() {
         body: JSON.stringify({ text: inputText })
       });
 
-      const payload = await response.json();
+      const payload = await parseJsonSafely(response);
       if (!response.ok) {
         throw new Error(payload?.error || "Generation failed");
       }
